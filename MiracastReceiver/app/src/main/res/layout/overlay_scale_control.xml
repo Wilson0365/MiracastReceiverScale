@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 比例控制浮层：电视遥控器操作，横向排列，底部居中 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="#CC000000"
+    android:orientation="horizontal"
+    android:padding="12dp"
+    android:gravity="center_vertical">
+
+    <TextView
+        android:id="@+id/btn_original"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/scale_button_selector"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:padding="12dp"
+        android:layout_marginEnd="6dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        android:text="原始" />
+
+    <TextView
+        android:id="@+id/btn_aspect_fill"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/scale_button_selector"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:padding="12dp"
+        android:layout_marginEnd="6dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        android:text="填满" />
+
+    <TextView
+        android:id="@+id/btn_scale_125"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/scale_button_selector"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:padding="12dp"
+        android:layout_marginEnd="6dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        android:text="125%" />
+
+    <TextView
+        android:id="@+id/btn_scale_150"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/scale_button_selector"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:padding="12dp"
+        android:layout_marginEnd="6dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        android:text="150%" />
+
+    <TextView
+        android:id="@+id/btn_scale_175"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/scale_button_selector"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:padding="12dp"
+        android:layout_marginEnd="6dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        android:text="175%" />
+
+    <TextView
+        android:id="@+id/btn_scale_200"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/scale_button_selector"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:padding="12dp"
+        android:layout_marginEnd="6dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        android:text="200%" />
+
+    <TextView
+        android:id="@+id/btn_scale_250"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/scale_button_selector"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:padding="12dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        android:text="250%" />
+
+</LinearLayout>

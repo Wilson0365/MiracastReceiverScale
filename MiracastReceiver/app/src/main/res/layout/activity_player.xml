@@ -147,4 +147,13 @@
         android:visibility="gone"
         tools:text="播放错误" />
 
+    <!-- 比例控制浮层：MENU 键呼出/隐藏，遥控器左右选档位 -->
+    <com.weekd.miracastreceiver.ScaleControlOverlay
+        android:id="@+id/scale_control_overlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="48dp"
+        android:visibility="gone" />
+
 </FrameLayout>

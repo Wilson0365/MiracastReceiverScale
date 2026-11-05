@@ -48,6 +48,9 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.AspectRatioFrameLayout
 import com.weekd.miracastreceiver.R
+import com.weekd.miracastreceiver.ScaleControlOverlay
+import com.weekd.miracastreceiver.ScaleManager
+import com.weekd.miracastreceiver.ScaleMode
 import com.weekd.miracastreceiver.cast.CastPlayerBridge
 import com.weekd.miracastreceiver.airplay.StreamStats
 import com.weekd.miracastreceiver.miracast.RtpReceiver
@@ -176,6 +179,10 @@ class PlayerActivity : AppCompatActivity() {
     private var exoRotateTexture: TextureView? = null
     private var currentSpeed = 1f
 
+    // 画面比例控制
+    private lateinit var scaleControlOverlay: ScaleControlOverlay
+    private lateinit var scaleManager: ScaleManager
+
     // 视频流信息面板
     private val streamInfoTracker = StreamInfoTracker()
     private var streamInfoJob: Job? = null
@@ -279,9 +286,18 @@ class PlayerActivity : AppCompatActivity() {
         }
         mirrorRotateLayer = findViewById(R.id.mirror_rotate_layer)
         mirrorRotateTexture = findViewById(R.id.mirror_rotate_texture)
+        scaleControlOverlay = findViewById(R.id.scale_control_overlay)
+        scaleControlOverlay.onModeSelected = { mode ->
+            scaleManager.switchMode(mode)
+            applyMirrorRotation()
+            updateMirrorSurfaceTarget()
+        }
         mirrorRotateTexture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
             override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
                 mirrorTextureSurface = Surface(st)
+                if (!::scaleManager.isInitialized || scaleManager.tvWidth != width || scaleManager.tvHeight != height) {
+                    scaleManager = ScaleManager(tvWidth = width, tvHeight = height)
+                }
                 updateMirrorSurfaceTarget()
                 applyRotation()
             }
@@ -537,14 +553,33 @@ class PlayerActivity : AppCompatActivity() {
             if (!alreadyFocused) return true
         }
         if (event.action == KeyEvent.ACTION_DOWN && !isDialogShowing) {
-            // 镜像/Miracast 没有控制条，INFO / MENU 键是信息面板的唯一入口
-            if (event.keyCode == KeyEvent.KEYCODE_INFO || event.keyCode == KeyEvent.KEYCODE_MENU) {
+            // INFO 键打开流信息面板；MENU 键在镜像模式开/关比例控制浮层
+            if (event.keyCode == KeyEvent.KEYCODE_INFO) {
                 toggleStreamInfo()
                 return true
             }
+            if (event.keyCode == KeyEvent.KEYCODE_MENU && isMirrorSession()) {
+                toggleScaleOverlay()
+                return true
+            }
             // 面板打开时返回键先关面板，不要直接结束播放
+            if (event.keyCode == KeyEvent.KEYCODE_BACK && scaleControlOverlay.visibility == View.VISIBLE) {
+                hideScaleOverlay()
+                return true
+            }
             if (event.keyCode == KeyEvent.KEYCODE_BACK && isStreamInfoVisible) {
                 hideStreamInfo()
+                return true
+            }
+            // 比例浮层显示时上下键用于平移画面
+            if (scaleControlOverlay.visibility == View.VISIBLE && isMirrorSession() &&
+                (event.keyCode == KeyEvent.KEYCODE_DPAD_UP || event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN)) {
+                val direction = if (event.keyCode == KeyEvent.KEYCODE_DPAD_UP) -1 else 1
+                val isAccelerated = event.repeatCount > 10
+                if (::scaleManager.isInitialized) {
+                    scaleManager.pan(direction, isAccelerated)
+                    applyMirrorRotation()
+                }
                 return true
             }
         }
@@ -601,6 +636,9 @@ class PlayerActivity : AppCompatActivity() {
         playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
         (playerView.videoSurfaceView as? SurfaceView)?.let { player?.setVideoSurfaceView(it) }
         resetImageRotation()
+        // 每次新投屏请求重置比例为原始
+        if (::scaleManager.isInitialized) scaleManager.switchMode(ScaleMode.ORIGINAL)
+        hideScaleOverlay()
         updateMirrorSurfaceTarget()
         if (intent?.getStringExtra(EXTRA_SOURCE_TYPE) == "MIRACAST") {
             startMiracastPlayback(intent.getIntExtra(EXTRA_RTP_PORT, 0), intent.getStringExtra(EXTRA_SESSION_ID))
@@ -982,6 +1020,21 @@ class PlayerActivity : AppCompatActivity() {
         tvStreamInfo.visibility = View.GONE
     }
 
+    private fun toggleScaleOverlay() {
+        if (scaleControlOverlay.visibility == View.VISIBLE) hideScaleOverlay()
+        else showScaleOverlay()
+    }
+
+    private fun showScaleOverlay() {
+        if (::scaleManager.isInitialized) scaleControlOverlay.setCurrentMode(scaleManager.mode)
+        scaleControlOverlay.visibility = View.VISIBLE
+        scaleControlOverlay.focusMode(if (::scaleManager.isInitialized) scaleManager.mode else ScaleMode.ORIGINAL)
+    }
+
+    private fun hideScaleOverlay() {
+        scaleControlOverlay.visibility = View.GONE
+    }
+
     private fun buildStreamInfoText(): String = when {
         isAirPlayMirrorSession -> buildAirPlayStreamInfo()
         isMiracastSession -> buildMiracastStreamInfo()
@@ -1179,10 +1232,12 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun applyMirrorRotation() {
-        val needsTexture = rotationDegrees != 0 || activeMirrorCrop().width() < 0.99f
+        val needsTexture = rotationDegrees != 0 || activeMirrorCrop().width() < 0.99f ||
+            (::scaleManager.isInitialized && scaleManager.mode != ScaleMode.ORIGINAL)
         setMirrorRotateLayerVisible(needsTexture)
         if (needsTexture) {
-            setTextureRotation(mirrorRotateTexture, StreamStats.videoWidth, StreamStats.videoHeight)
+            val sm = if (::scaleManager.isInitialized) scaleManager else null
+            setTextureRotation(mirrorRotateTexture, StreamStats.videoWidth, StreamStats.videoHeight, sm)
         }
     }
 
@@ -1201,7 +1256,7 @@ class PlayerActivity : AppCompatActivity() {
         // TextureView 第一次显示时 SurfaceTexture 要等一帧绘制才就绪。这段时间继续用 SurfaceView，
         // 千万不能发布 null：解码器会当成 Surface 丢失而重建，重建后要等 iPhone 的下一个关键帧，
         // 静止画面下可能一直黑屏。就绪后再原地切过去。
-        val useTexture = isMirrorSession() && (rotationDegrees != 0 || activeMirrorCrop().width() < 0.99f) && mirrorTextureSurface != null
+        val useTexture = isMirrorSession() && (rotationDegrees != 0 || activeMirrorCrop().width() < 0.99f || (::scaleManager.isInitialized && scaleManager.mode != ScaleMode.ORIGINAL)) && mirrorTextureSurface != null
         val target = if (useTexture) mirrorTextureSurface else mirrorHolderSurface
         if (target !== mirrorSurface) {
             Timber.i("Mirror render target -> ${if (useTexture) "TextureView" else "SurfaceView"} (${if (target == null) "not ready" else "ready"})")
@@ -1257,7 +1312,7 @@ class PlayerActivity : AppCompatActivity() {
      * TextureView 默认把画面拉伸铺满整个视图。这里先还原成视频本身的宽高、绕中心旋转，
      * 再按旋转后的宽高等比缩放到能完整放进视图，效果等同 fitCenter + 旋转。
      */
-    private fun setTextureRotation(texture: TextureView, videoW: Int, videoH: Int) {
+    private fun setTextureRotation(texture: TextureView, videoW: Int, videoH: Int, sm: ScaleManager? = null) {
         val viewW = texture.width.toFloat()
         val viewH = texture.height.toFloat()
         if (viewW <= 0f || viewH <= 0f) return
@@ -1268,12 +1323,27 @@ class PlayerActivity : AppCompatActivity() {
         val rotatedW = if (sideways) h * crop.height() else w * crop.width()
         val rotatedH = if (sideways) w * crop.width() else h * crop.height()
         val fit = minOf(viewW / rotatedW, viewH / rotatedH)
+        val extraScale = if (sm != null && sm.mode != ScaleMode.ORIGINAL) {
+            when (sm.mode) {
+                ScaleMode.ASPECT_FILL -> {
+                    val s = maxOf(viewW / rotatedW, viewH / rotatedH) / fit
+                    if (s < 1f) 1f else s
+                }
+                else -> sm.mode.factor ?: 1f
+            }
+        } else 1f
+        val totalFit = fit * extraScale
+        // Clamp pan offset to visible region: scaled content height minus view height, halved.
+        val scaledContentH = rotatedH * totalFit
+        val maxOffsetY = ((scaledContentH - viewH) / 2f).coerceAtLeast(0f)
+        val clampedOffsetY = (sm?.offsetY ?: 0f).coerceIn(-maxOffsetY, maxOffsetY)
+        sm?.let { if (it.offsetY != clampedOffsetY) it.forceOffsetY(clampedOffsetY) }
         val matrix = Matrix().apply {
             postScale(w / viewW, h / viewH)
             postTranslate(-w * crop.centerX(), -h * crop.centerY())
             postRotate(rotationDegrees.toFloat())
-            postScale(fit, fit)
-            postTranslate(viewW / 2f, viewH / 2f)
+            postScale(totalFit, totalFit)
+            postTranslate(viewW / 2f, viewH / 2f + clampedOffsetY)
         }
         texture.setTransform(matrix)
         texture.invalidate()
