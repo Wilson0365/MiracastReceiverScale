@@ -363,7 +363,10 @@ class WifiDirectManager(
 
     /**
      * 本机是 GO 时，OPPO / Samsung 的系统投屏会发 PBC provision-discovery 并等 GO 回应 connect()，
-     * 不回应对方会超时。所以对未连接的 peer 主动 connect()（2 秒冷却）。仅 APP 模式下才会走到这里。
+     * 不回应对方会超时。所以对 WFD source 设备主动 connect()（2 秒冷却）。
+     *
+     * 只对 WFD source 发起连接（deviceType PRIMARY_SOURCE=0 或 SECONDARY_SOURCE=2）。
+     * 没有 WFD info 或者 deviceType 是 sink（1/3）的设备一律跳过，避免连到邻居电视等非发送端设备。
      */
     private fun handlePeersChanged(gen: Int) {
         val p2p = manager ?: return
@@ -373,10 +376,11 @@ class WifiDirectManager(
             val now = System.currentTimeMillis()
             peers.deviceList.forEach { device ->
                 if (device.status == WifiP2pDevice.CONNECTED) return@forEach
+                if (!isWfdSource(device)) return@forEach
                 val last = lastConnectAttempt[device.deviceAddress] ?: 0L
                 if (now - last < 2_000L) return@forEach
                 lastConnectAttempt[device.deviceAddress] = now
-                Timber.i("connect() to ${device.deviceName} (${device.deviceAddress}) status=${device.status}")
+                Timber.i("connect() to WFD source ${device.deviceName} (${device.deviceAddress})")
                 val config = WifiP2pConfig().apply {
                     deviceAddress = device.deviceAddress
                     wps.setup = WpsInfo.PBC
@@ -393,6 +397,24 @@ class WifiDirectManager(
                     Timber.w("connect() denied: $e")
                 }
             }
+        }
+    }
+
+    /**
+     * 判断设备是否为 WFD source（发送端）。
+     * WFD deviceType: 0=PRIMARY_SOURCE, 1=PRIMARY_SINK, 2=SECONDARY_SOURCE, 3=SECONDARY_SINK
+     * 没有 WFD info 或者 isEnabled=false → 不是 Miracast 设备，跳过。
+     * sink（1/3）→ 是电视/显示器，不是投屏发送端，跳过。
+     */
+    private fun isWfdSource(device: WifiP2pDevice): Boolean {
+        return try {
+            val wfdInfo = device.wfdInfo ?: return false
+            if (!wfdInfo.isWfdEnabled) return false
+            // deviceType 0/2 = source；1/3 = sink
+            val deviceType = wfdInfo.deviceType
+            deviceType == 0 || deviceType == 2
+        } catch (e: Exception) {
+            false
         }
     }
 }
