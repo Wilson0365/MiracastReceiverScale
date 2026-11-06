@@ -307,7 +307,13 @@ class WifiDirectManager(
                 }
             })
 
-            startDiscovery()
+            // GO 模式（takeover）不主动 discover —— createGroup() 建好组后手机会来 join；
+            // discoverPeers 和 createGroup 同时调会让 P2P 框架 BUSY，导致建组静默失败。
+            if (!AppSettings.isMiracastTakeover(context)) {
+                startDiscovery()
+            } else {
+                Timber.d("Takeover mode: skipping discoverPeers before createGroup()")
+            }
         } catch (e: SecurityException) {
             // 用户拒绝定位权限时走这里 —— Miracast 用不了，但不该影响 AirPlay / DLNA
             Timber.w("注册 P2P 本地服务被拒绝（缺少定位权限），Miracast 不可用")
