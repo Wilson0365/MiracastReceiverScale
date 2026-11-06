@@ -518,6 +518,8 @@ class WifiDirectManager(
      */
     fun applyTakeoverState(enabled: Boolean) {
         if (!isStarted) return
+        // 先持久化到 SharedPreferences，确保 CONNECTION_CHANGED 回调时 isMiracastTakeover() 读到新值
+        AppSettings.setMiracastTakeover(context, enabled)
         val target = if (enabled) 0 else 1
         try {
             Settings.Global.putInt(context.contentResolver, "wifi_display_on", target)
