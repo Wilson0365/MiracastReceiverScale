@@ -209,6 +209,10 @@ class WifiDirectManager(
 
                             // 设置设备名称
                             setDeviceName(deviceName)
+
+                            // GO 建好后再启动 discovery，让手机端能发现这台电视。
+                            // 此时 group 已存在，discovery 不会与 createGroup 竞争。
+                            startDiscovery()
                         } else {
                             onStartupState?.invoke(StartupState.FAILED)
                         }
