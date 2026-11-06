@@ -1,557 +1,398 @@
 package com.weekd.miracastreceiver.miracast
 
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pDeviceList
-import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.WifiP2pGroup
 import android.net.wifi.p2p.WifiP2pManager
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
-import android.provider.Settings
-import androidx.core.content.ContextCompat
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import com.weekd.miracastreceiver.util.AppSettings
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+/** Wi-Fi Direct / Miracast 需要的运行时权限（与 MainActivity 申请的一致）。 */
+object MiracastPermissions {
+    val required: Array<String>
+        get() = if (Build.VERSION.SDK_INT >= 33) {
+            arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        }
+
+    fun granted(ctx: Context): Boolean = required.all {
+        ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED
+    }
+}
 
 /**
- * Wi-Fi Direct (P2P) 管理器
- * 用于 Miracast/WFD 设备发现
- */
-/**
- * @param deviceName 对外显示的 P2P 设备名。Windows 的「无线显示器」列表里显示的就是它，
- *   所以必须和 AirPlay / DLNA 用同一个名字（[com.weekd.miracastreceiver.discovery.DeviceInfoProvider]），
- *   否则同一台设备在不同投屏方式下会显示成不同名称。
+ * Wi-Fi Direct 的"原子操作"集合，**没有自己的模式判断**。
+ *
+ * 只有 [MiracastController] 在 APP 模式下才会 [open]；SYSTEM 模式下这个类处于关闭状态，
+ * 没有 channel、没有广播接收器、没有 discovery、没有自动 connect()，对系统服务零干扰。
+ *
+ * 所有回调都带 generation 校验：[close] 之后迟到的系统广播一律丢弃，
+ * 不会出现"切到系统模式后又被旧回调重建了 group"。
  */
 class WifiDirectManager(
     private val context: Context,
     private val deviceName: String
 ) {
-    /**
-     * 不少老电视（尤其非 Android TV 认证的整机）根本没有 Wi-Fi Direct，
-     * `getSystemService` 会返回 null。原先用非空强转，一启动就抛异常闪退 ——
-     * 而 Miracast 只是三种投屏方式之一，不该拖垮整个应用。
-     */
+    companion object {
+        private const val ACTION_OK = -1
+        private const val ACTION_TIMEOUT = -2
+        private const val ACTION_TIMEOUT_MS = 8_000L
+        private const val GROUP_ATTEMPTS = 3
+        private const val DISCOVERY_RESTART_INTERVAL_MS = 90_000L
+        private const val WFD_CONTROL_PORT = 7236
+    }
+
+    /** 老电视可能根本没有 Wi-Fi Direct，getSystemService 会返回 null。 */
     private val manager: WifiP2pManager? by lazy {
         context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
     }
 
     private var channel: WifiP2pManager.Channel? = null
     private var receiver: BroadcastReceiver? = null
-    private var isStarted = false
-    // true when this device is P2P Group Owner; false when no group or we are client.
-    // Set in CONNECTION_CHANGED. Guarded by main thread (all P2P callbacks run there).
-    private var isGroupOwner = false
-    // 记录上次对某设备发起 connect() 的时间，防止 PEERS_CHANGED 风暴时重复调用
-    private val lastConnectAttempt = mutableMapOf<String, Long>()
+    private var generation = 0
 
+    private val lastConnectAttempt = mutableMapOf<String, Long>()
     private val discoveryHandler = Handler(Looper.getMainLooper())
-    private val restartDiscoveryRunnable = Runnable { restartDiscovery() }
-    private val DISCOVERY_RESTART_INTERVAL_MS = 90_000L
-    enum class StartupState { STARTING, UNSUPPORTED, PERMISSION_REQUIRED, WIFI_DISABLED, FAILED }
-    var onStartupState: ((StartupState) -> Unit)? = null
-    var onWfdConfigured: (() -> Unit)? = null
+    private val restartDiscoveryRunnable = Runnable { startDiscovery() }
+
+    /** P2P 组丢了（发送端断开、系统回收等）。由 Controller 决定要不要重建。 */
+    var onGroupDropped: (() -> Unit)? = null
+
+    /** P2P 开关状态变化（用户关 Wi-Fi 等）。 */
+    var onP2pEnabledChanged: ((Boolean) -> Unit)? = null
+
+    val isOpen: Boolean get() = channel != null
+
     var isWfdConfigured = false
         private set
 
-    var onDeviceConnected: ((WifiP2pDevice) -> Unit)? = null
-    var onDeviceDisconnected: (() -> Unit)? = null
-    var onGroupCreated: ((WifiP2pGroup) -> Unit)? = null
+    fun isSupported(): Boolean = manager != null
 
-    fun start() {
-        if (isStarted) {
-            Timber.w("Wi-Fi Direct already started")
-            return
+    // ---------------------------------------------------------------- 生命周期
+
+    /** 创建 channel 并注册广播接收器。失败抛 [MiracastException]，并保证不留半成品。 */
+    fun open() {
+        if (channel != null) return
+        val p2p = manager ?: throw MiracastException(MiracastError.UNSUPPORTED)
+        try {
+            val ch = p2p.initialize(context, Looper.getMainLooper(), null)
+                ?: throw MiracastException(MiracastError.UNSUPPORTED)
+            channel = ch
+            generation++
+            registerReceiver(generation)
+            Timber.i("Wi-Fi Direct opened")
+        } catch (e: SecurityException) {
+            channel = null
+            throw MiracastException(MiracastError.PERMISSION_MISSING, e)
         }
+    }
 
+    /** 撤销一切：discovery、本地服务、P2P 组、接收器、channel。幂等，不抛异常。 */
+    suspend fun close() {
+        cancelDiscoveryRestart()
+        generation++                       // 先让所有迟到的回调失效
+        receiver?.let { runCatching { context.unregisterReceiver(it) } }
+        receiver = null
+
+        val ch = channel
         val p2p = manager
-        if (p2p == null) {
-            onStartupState?.invoke(StartupState.UNSUPPORTED)
-            Timber.w("本机不支持 Wi-Fi Direct，Miracast 不可用（AirPlay / DLNA 不受影响）")
-            return
+        if (ch != null && p2p != null) {
+            runCatching { action(3_000L) { p2p.stopPeerDiscovery(ch, it) } }
+            runCatching { action(3_000L) { p2p.clearLocalServices(ch, it) } }
+            runCatching { action(5_000L) { p2p.removeGroup(ch, it) } }
+            if (Build.VERSION.SDK_INT >= 27) runCatching { ch.close() }
         }
+        channel = null
+        isWfdConfigured = false
+        lastConnectAttempt.clear()
+        Timber.i("Wi-Fi Direct closed")
+    }
 
+    /**
+     * 深度清理：不依赖 [open] 过的状态。
+     * 进程崩溃后 P2P 组 / 本地服务 / discovery 可能还留在系统里，而我们手里已经没有 channel 了，
+     * 所以这里临时 initialize 一个 channel，把能撤的全撤掉。幂等，不抛异常。
+     */
+    suspend fun purge() {
+        if (channel != null) { close(); return }
+        val p2p = manager ?: return
         try {
-            onStartupState?.invoke(StartupState.STARTING)
-            channel = p2p.initialize(context, Looper.getMainLooper(), null)
-
-            if (channel == null) {
-                onStartupState?.invoke(StartupState.FAILED)
-                Timber.e("Failed to initialize Wi-Fi P2P channel")
-                return
-            }
-
-            // 注册 Wi-Fi Direct 广播接收器
-            registerReceiver()
-
-            // 尝试设置系统级 Wi-Fi Display Sink 信息；Windows 发现无线显示器依赖这个 WFD IE
-            setWfdInfo()
-
-            // 注册本地服务以支持服务发现
-            registerLocalService()
-
-            isStarted = true
-            Timber.i("Wi-Fi Direct started for Miracast")
-
-            // 如果接管开关已启用，立即建组并写 wifi_display_on=0，让手机能找到 GO
-            if (AppSettings.isMiracastTakeover(context)) {
-                try {
-                    Settings.Global.putInt(context.contentResolver, "wifi_display_on", 0)
-                    Timber.i("wifi_display_on set to 0 on start (takeover enabled)")
-                } catch (se: SecurityException) {
-                    Timber.w("Cannot write wifi_display_on on start: $se")
-                }
-                createGroup()
-            }
+            val ch = p2p.initialize(context, Looper.getMainLooper(), null) ?: return
+            runCatching { action(3_000L) { p2p.stopPeerDiscovery(ch, it) } }
+            runCatching { action(3_000L) { p2p.clearLocalServices(ch, it) } }
+            runCatching { action(5_000L) { p2p.removeGroup(ch, it) } }
+            if (Build.VERSION.SDK_INT >= 27) runCatching { ch.close() }
+            Timber.i("Wi-Fi Direct purged")
         } catch (e: SecurityException) {
-            onStartupState?.invoke(StartupState.PERMISSION_REQUIRED)
-            Timber.w(e, "Wi-Fi Direct permission required")
+            Timber.w("purge skipped, permission missing")
         } catch (e: Exception) {
-            onStartupState?.invoke(StartupState.FAILED)
-            Timber.e(e, "Failed to start Wi-Fi Direct")
+            Timber.w(e, "purge failed")
         }
     }
 
-    private fun setWfdInfo() {
-        val ch = channel ?: return
+    // ---------------------------------------------------------------- 原子操作
 
-        try {
-            val wfdInfoClass = Class.forName("android.net.wifi.p2p.WifiP2pWfdInfo")
-            val wfdInfo = wfdInfoClass.newInstance()
-
-            // API 28+ 改名：setWfdEnabled → setEnabled；老 API 保留旧名
-            invokeReflect(wfdInfo, wfdInfoClass, true,
-                "setEnabled", "setWfdEnabled")
-
-            // PRIMARY_SINK = 1
-            wfdInfoClass.getMethod("setDeviceType", Int::class.java).invoke(wfdInfo, 1)
-
-            // API 28+ 改名：setSessionAvailable → setSessionAvailable（未改，但有些厂商 ROM 用旧名）
-            invokeReflect(wfdInfo, wfdInfoClass, true,
-                "setSessionAvailable")
-
-            // RTSP 控制端口
-            wfdInfoClass.getMethod("setControlPort", Int::class.java).invoke(wfdInfo, 7236)
-
-            // 最大吞吐量 50 Mbps
-            wfdInfoClass.getMethod("setMaxThroughput", Int::class.java).invoke(wfdInfo, 50)
-
-            val setWFDInfoMethod = WifiP2pManager::class.java.getMethod(
-                "setWFDInfo",
-                WifiP2pManager.Channel::class.java,
-                wfdInfoClass,
-                WifiP2pManager.ActionListener::class.java
-            )
-
-            setWFDInfoMethod.invoke(manager, ch, wfdInfo, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    isWfdConfigured = true
-                    onWfdConfigured?.invoke()
-                    Timber.i("✅ WFD Info set successfully!")
-                }
-
-                override fun onFailure(reason: Int) {
-                    val reasonText = when (reason) {
-                        WifiP2pManager.ERROR -> "ERROR"
-                        WifiP2pManager.P2P_UNSUPPORTED -> "P2P_UNSUPPORTED"
-                        WifiP2pManager.BUSY -> "BUSY"
-                        else -> "UNKNOWN($reason)"
-                    }
-                    Timber.e("❌ setWFDInfo failed: $reasonText")
-                }
-            })
-
+    /** 注册 _miracast._tcp 本地服务。尽力而为，失败不致命。 */
+    suspend fun registerLocalService(): Boolean {
+        val p2p = manager ?: return false
+        val ch = channel ?: return false
+        return try {
+            val record = mapOf("version" to "1.0", "type" to "miracast-sink", "rtsp_port" to "$WFD_CONTROL_PORT")
+            val info = WifiP2pDnsSdServiceInfo.newInstance("_miracast", "_tcp", record)
+            action { p2p.addLocalService(ch, info, it) } == ACTION_OK
         } catch (e: SecurityException) {
-            Timber.e(e, "❌ setWFDInfo: SecurityException (CONFIGURE_WIFI_DISPLAY required)")
-        } catch (e: ClassNotFoundException) {
-            Timber.e(e, "❌ WifiP2pWfdInfo class not found")
-        } catch (e: NoSuchMethodException) {
-            Timber.e(e, "❌ setWFDInfo method not found: ${e.message}")
-        } catch (e: Exception) {
-            Timber.e(e, "❌ setWFDInfo error")
+            throw MiracastException(MiracastError.PERMISSION_MISSING, e)
         }
     }
 
     /**
-     * 按给定名称顺序依次尝试反射调用，找到第一个存在的方法就调用并返回。
-     * 全部不存在时抛 NoSuchMethodException（带所有尝试的名字）。
+     * 建立 P2P 组（本机为 GO）。
+     * @return true = 新建了组；false = 已经有本机为 GO 的组，直接复用。
+     * 注意：不要和 discoverPeers 同时调用，会 BUSY（所以 discovery 在建组之后再启动）。
      */
-    private fun invokeReflect(obj: Any, cls: Class<*>, arg: Boolean, vararg methodNames: String) {
-        for (name in methodNames) {
-            try {
-                cls.getMethod(name, Boolean::class.java).invoke(obj, arg)
-                return
-            } catch (_: NoSuchMethodException) {
-                // 继续尝试下一个名字
-            }
-        }
-        throw NoSuchMethodException("None of ${methodNames.toList()} found in ${cls.simpleName}")
-    }
-
-    private fun createGroup() {
-        val ch = channel ?: return
-
+    suspend fun createGroup(): Boolean {
+        val p2p = manager ?: throw MiracastException(MiracastError.UNSUPPORTED)
+        val ch = channel ?: throw MiracastException(MiracastError.UNKNOWN)
         try {
-            manager?.createGroup(ch, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    Timber.i("Wi-Fi Direct group created successfully")
+            val existing = requestGroup()
+            if (existing != null) {
+                if (existing.isGroupOwner) return false
+                action(5_000L) { p2p.removeGroup(ch, it) }
+                delay(500)
+            }
 
-                    // 查询组信息
-                    manager?.requestGroupInfo(ch) { group ->
-                        if (group != null) {
-                            isGroupOwner = true
-                            Timber.i("Group created - SSID: ${group.networkName}, Owner: ${group.isGroupOwner}")
-                            onGroupCreated?.invoke(group)
-
-                            // 设置设备名称
-                            setDeviceName(deviceName)
-
-                            // GO 建好后再启动 discovery，让手机端能发现这台电视。
-                            // 此时 group 已存在，discovery 不会与 createGroup 竞争。
-                            startDiscovery()
-                        } else {
-                            onStartupState?.invoke(StartupState.FAILED)
-                        }
-                    }
+            var last = ACTION_OK
+            for (attempt in 1..GROUP_ATTEMPTS) {
+                last = action { p2p.createGroup(ch, it) }
+                if (last == ACTION_OK) {
+                    Timber.i("Wi-Fi Direct group created")
+                    setDeviceName(p2p, ch)
+                    return true
                 }
-
-                override fun onFailure(reason: Int) {
-                    val reasonText = when (reason) {
-                        WifiP2pManager.ERROR -> "ERROR"
-                        WifiP2pManager.P2P_UNSUPPORTED -> "P2P_UNSUPPORTED"
-                        WifiP2pManager.BUSY -> "BUSY"
-                        else -> "UNKNOWN($reason)"
-                    }
-                    Timber.e("Failed to create Wi-Fi Direct group: $reasonText")
-
-                    // 如果失败，尝试作为客户端模式
-                    if (reason == WifiP2pManager.BUSY) {
-                        // 可能已经有组存在，尝试获取当前组信息
-                        manager?.requestGroupInfo(ch) { group ->
-                            if (group != null) {
-                                isGroupOwner = true
-                                Timber.i("Existing group found: ${group.networkName}")
-                                onGroupCreated?.invoke(group)
-                            } else {
-                                onStartupState?.invoke(StartupState.FAILED)
-                            }
-                        }
-                    } else {
-                        onStartupState?.invoke(if (reason == WifiP2pManager.P2P_UNSUPPORTED)
-                            StartupState.UNSUPPORTED else StartupState.FAILED)
-                    }
-                }
-            })
+                if (last == WifiP2pManager.P2P_UNSUPPORTED) throw MiracastException(MiracastError.UNSUPPORTED)
+                Timber.w("createGroup attempt $attempt failed: $last")
+                delay(1_000L * attempt)
+            }
+            throw MiracastException(
+                if (last == ACTION_TIMEOUT) MiracastError.TIMEOUT else MiracastError.GROUP_FAILED
+            )
         } catch (e: SecurityException) {
-            onStartupState?.invoke(StartupState.PERMISSION_REQUIRED)
-            Timber.e(e, "Security exception when creating group - missing permissions?")
-        } catch (e: Exception) {
-            onStartupState?.invoke(StartupState.FAILED)
-            Timber.e(e, "Exception when creating group")
+            throw MiracastException(MiracastError.PERMISSION_MISSING, e)
         }
     }
 
     /**
-     * 尝试把 P2P 设备名改成 [deviceName]（安卓手机投屏列表里显示的就是它）。
-     *
-     * Android 11 起系统要求调用方持有 NETWORK_SETTINGS / NETWORK_STACK / OVERRIDE_WIFI_CONFIG
-     * 之一，普通应用拿不到，这里必然失败，名称保持系统默认的 `Android_xxxx`。
-     * 只有旧系统或系统签名的构建才会成功，保留调用是为了这些设备。
+     * 通过 setWFDInfo 声明自己是 Sink。需要 signature 级 CONFIGURE_WIFI_DISPLAY，
+     * 普通应用基本必败——如果失败，WFD IE 不会广播，Windows 等依赖 WFD IE 的发送端找不到本机。
+     * 手机发送端（OPPO/Samsung/小米）通常不依赖 WFD IE，靠 P2P 设备发现即可连接。
      */
-    private fun setDeviceName(name: String) {
-        try {
-            // 使用反射设置设备名称（API 限制）
-            val setDeviceNameMethod = WifiP2pManager::class.java.getMethod(
-                "setDeviceName",
-                WifiP2pManager.Channel::class.java,
-                String::class.java,
-                WifiP2pManager.ActionListener::class.java
+    suspend fun setWfdInfo(): Boolean {
+        val p2p = manager ?: return false
+        val ch = channel ?: return false
+        return try {
+            val cls = Class.forName("android.net.wifi.p2p.WifiP2pWfdInfo")
+            val info = cls.getDeclaredConstructor().newInstance()
+            invokeReflect(info, cls, true, "setEnabled", "setWfdEnabled")
+            cls.getMethod("setDeviceType", Int::class.java).invoke(info, 1) // PRIMARY_SINK
+            invokeReflect(info, cls, true, "setSessionAvailable")
+            cls.getMethod("setControlPort", Int::class.java).invoke(info, WFD_CONTROL_PORT)
+            cls.getMethod("setMaxThroughput", Int::class.java).invoke(info, 50)
+
+            val method = WifiP2pManager::class.java.getMethod(
+                "setWFDInfo", WifiP2pManager.Channel::class.java, cls, WifiP2pManager.ActionListener::class.java
             )
-
-            setDeviceNameMethod.invoke(manager, channel, name, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    Timber.i("Device name set to: $name")
-                }
-
-                override fun onFailure(reason: Int) {
-                    Timber.w("Failed to set device name: $reason")
-                }
-            })
+            val ok = action { method.invoke(p2p, ch, info, it) } == ACTION_OK
+            isWfdConfigured = ok
+            ok
         } catch (e: Exception) {
-            Timber.w(e, "Could not set device name (requires system permissions)")
+            Timber.w("setWFDInfo unavailable: ${e.cause ?: e}")
+            false
         }
     }
 
-    private fun registerLocalService() {
+    /** 本机是不是还持有一个 GO 组（健康检查用）。 */
+    suspend fun hasGroup(): Boolean = requestGroup()?.isGroupOwner == true
+
+    /** 启动 peer discovery（建组之后调用），并定时重启保活。 */
+    fun startDiscovery() {
+        val p2p = manager ?: return
         val ch = channel ?: return
-
         try {
-            // 创建 WFD 服务信息
-            val record = mapOf(
-                "version" to "1.0",
-                "type" to "miracast-sink",
-                "rtsp_port" to "7236"
-            )
-
-            val serviceInfo = WifiP2pDnsSdServiceInfo.newInstance(
-                "_miracast", "_tcp", record
-            )
-
-            manager?.addLocalService(ch, serviceInfo, object : WifiP2pManager.ActionListener {
+            p2p.discoverPeers(ch, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
-                    Timber.i("Local Miracast service registered")
+                    Timber.i("Miracast peer discovery started")
+                    scheduleDiscoveryRestart()
                 }
 
                 override fun onFailure(reason: Int) {
-                    Timber.e("Failed to register local service: $reason")
+                    Timber.w("Peer discovery failed: $reason")
+                    scheduleDiscoveryRestart()
                 }
             })
-
-            // GO 模式（takeover）不主动 discover —— createGroup() 建好组后手机会来 join；
-            // discoverPeers 和 createGroup 同时调会让 P2P 框架 BUSY，导致建组静默失败。
-            if (!AppSettings.isMiracastTakeover(context)) {
-                startDiscovery()
-            } else {
-                Timber.d("Takeover mode: skipping discoverPeers before createGroup()")
-            }
         } catch (e: SecurityException) {
-            // 用户拒绝定位权限时走这里 —— Miracast 用不了，但不该影响 AirPlay / DLNA
-            Timber.w("注册 P2P 本地服务被拒绝（缺少定位权限），Miracast 不可用")
-        } catch (e: Exception) {
-            Timber.e(e, "Error registering local service")
+            Timber.w("discoverPeers denied: $e")
         }
     }
 
-    private fun startDiscovery() {
+    /** 断开当前发送端：移除组。CONNECTION_CHANGED 会触发 [onGroupDropped]，由 Controller 重建。 */
+    fun disconnectSender() {
+        val p2p = manager ?: return
         val ch = channel ?: return
-        // Miracast 依赖 P2P 设备发现与 WFD IE；discoverServices 没有
-        // addServiceRequest 时会以 NO_SERVICE_REQUESTS 失败，无法启动发现。
-        manager?.discoverPeers(ch, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() {
-                Timber.i("Miracast peer discovery started")
-                scheduleDiscoveryRestart()
-            }
-            override fun onFailure(reason: Int) {
-                Timber.e("Failed to start Miracast peer discovery: $reason")
-                // 失败后稍后重试（可能是 BUSY）
-                scheduleDiscoveryRestart()
-            }
+        p2p.removeGroup(ch, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() = Timber.i("Miracast sender disconnected")
+            override fun onFailure(reason: Int) = Timber.w("removeGroup failed: $reason")
         })
     }
 
-    private fun restartDiscovery() {
-        if (!isStarted) return
-        Timber.d("Restarting peer discovery to keep P2P stack active")
-        startDiscovery()
-    }
+    // ---------------------------------------------------------------- 内部
 
     private fun scheduleDiscoveryRestart() {
         discoveryHandler.removeCallbacks(restartDiscoveryRunnable)
         discoveryHandler.postDelayed(restartDiscoveryRunnable, DISCOVERY_RESTART_INTERVAL_MS)
     }
 
-    private fun cancelDiscoveryRestart() {
-        discoveryHandler.removeCallbacks(restartDiscoveryRunnable)
+    private fun cancelDiscoveryRestart() = discoveryHandler.removeCallbacks(restartDiscoveryRunnable)
+
+    private suspend fun requestGroup(): WifiP2pGroup? {
+        val p2p = manager ?: return null
+        val ch = channel ?: return null
+        return withTimeoutOrNull(5_000L) {
+            suspendCancellableCoroutine<WifiP2pGroup?> { cont ->
+                p2p.requestGroupInfo(ch) { group -> if (cont.isActive) cont.resume(group) }
+            }
+        }
     }
 
-    private fun registerReceiver() {
-        val intentFilter = IntentFilter().apply {
+    /** 把 ActionListener 包成挂起函数：返回 ACTION_OK / 失败 reason / ACTION_TIMEOUT。 */
+    private suspend fun action(
+        timeoutMs: Long = ACTION_TIMEOUT_MS,
+        call: (WifiP2pManager.ActionListener) -> Unit
+    ): Int = withTimeoutOrNull(timeoutMs) {
+        suspendCancellableCoroutine<Int> { cont ->
+            val listener = object : WifiP2pManager.ActionListener {
+                override fun onSuccess() { if (cont.isActive) cont.resume(ACTION_OK) }
+                override fun onFailure(reason: Int) { if (cont.isActive) cont.resume(reason) }
+            }
+            try {
+                call(listener)
+            } catch (e: Throwable) {
+                if (cont.isActive) cont.resumeWithException(e)
+            }
+        }
+    } ?: ACTION_TIMEOUT
+
+    private fun invokeReflect(obj: Any, cls: Class<*>, arg: Boolean, vararg names: String) {
+        for (name in names) {
+            try {
+                cls.getMethod(name, Boolean::class.java).invoke(obj, arg)
+                return
+            } catch (_: NoSuchMethodException) {
+            }
+        }
+        throw NoSuchMethodException("None of ${names.toList()} found in ${cls.simpleName}")
+    }
+
+    /** Android 11+ 普通应用必败，保留给旧系统 / 系统签名构建。 */
+    private fun setDeviceName(p2p: WifiP2pManager, ch: WifiP2pManager.Channel) {
+        try {
+            val m = WifiP2pManager::class.java.getMethod(
+                "setDeviceName",
+                WifiP2pManager.Channel::class.java, String::class.java, WifiP2pManager.ActionListener::class.java
+            )
+            m.invoke(p2p, ch, deviceName, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() = Timber.i("Device name set to: $deviceName")
+                override fun onFailure(reason: Int) = Timber.w("Failed to set device name: $reason")
+            })
+        } catch (e: Exception) {
+            Timber.d("Could not set device name (requires system permissions)")
+        }
+    }
+
+    private fun registerReceiver(gen: Int) {
+        val filter = IntentFilter().apply {
             addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
             addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
             addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
-            addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
         }
-
-        receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                if (gen != generation) return          // close() 之后迟到的广播
                 when (intent.action) {
                     WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
-                        val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
-                        val enabled = state == WifiP2pManager.WIFI_P2P_STATE_ENABLED
-                        if (!enabled) {
-                            onStartupState?.invoke(StartupState.WIFI_DISABLED)
-                            cancelDiscoveryRestart()
-                        } else {
-                            // P2P 刚启用（或重新启用），立即重新发现
-                            startDiscovery()
-                        }
-                        Timber.d("Wi-Fi P2P state changed: ${if (enabled) "ENABLED" else "DISABLED"}")
+                        val enabled = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1) ==
+                            WifiP2pManager.WIFI_P2P_STATE_ENABLED
+                        if (!enabled) cancelDiscoveryRestart()
+                        onP2pEnabledChanged?.invoke(enabled)
                     }
 
-                    WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
-                        Timber.d("Wi-Fi P2P peers changed")
-                        channel?.let { ch ->
-                            manager?.requestPeers(ch) { peers: WifiP2pDeviceList ->
-                                val now = System.currentTimeMillis()
-                                peers.deviceList.forEach { device ->
-                                    Timber.i("Peer: ${device.deviceName} status=${device.status}")
-                                    // Already connected — nothing to do.
-                                    // When we are GO (isGroupOwner=true), OPPO/Samsung system Miracast
-                                    // sends a P2P PBC provision-discovery request and waits for the GO to
-                                    // reply with connect().  If we skip connect(), their request times out
-                                    // and the join never completes.  So: skip only if already CONNECTED.
-                                    if (device.status != WifiP2pDevice.CONNECTED) {
-                                        val last = lastConnectAttempt[device.deviceAddress] ?: 0L
-                                        if (now - last < 2000L) return@forEach  // 2 秒冷却
-                                        lastConnectAttempt[device.deviceAddress] = now
-                                        Timber.i("Attempting connect() to ${device.deviceName} (${device.deviceAddress}) status=${device.status}")
-                                        val config = WifiP2pConfig().apply {
-                                            deviceAddress = device.deviceAddress
-                                            wps.setup = WpsInfo.PBC
-                                        }
-                                        manager?.connect(ch, config, object : WifiP2pManager.ActionListener {
-                                            override fun onSuccess() {
-                                                Timber.i("connect() sent for ${device.deviceName}")
-                                            }
-                                            override fun onFailure(reason: Int) {
-                                                Timber.w("connect() failed for ${device.deviceName}: reason=$reason")
-                                                // 失败立即解除冷却，允许下一次 PEERS_CHANGED 再试
-                                                lastConnectAttempt.remove(device.deviceAddress)
-                                            }
-                                        })
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> handlePeersChanged(gen)
 
                     WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
-                        Timber.d("Wi-Fi P2P connection changed")
-                        channel?.let { ch ->
-                            manager?.requestConnectionInfo(ch) { info ->
-                                if (info.groupFormed && info.isGroupOwner) {
-                                    isGroupOwner = true
-                                    Timber.i("P2P Group formed, we are GO. IP: ${info.groupOwnerAddress?.hostAddress}")
-                                    // 已建组，停止定时重启（连接中不需要 discovery）
-                                    cancelDiscoveryRestart()
-                                } else if (info.groupFormed) {
-                                    isGroupOwner = false
-                                    Timber.i("P2P Group formed - we are client, GO: ${info.groupOwnerAddress?.hostAddress}")
-                                    cancelDiscoveryRestart()
-                                } else {
-                                    isGroupOwner = false
-                                    Timber.d("P2P group not formed (connection changed without group)")
-                                    // 断开后：takeover 启用则重建 group（手机发现 GO）；否则仅 discovery
-                                    if (AppSettings.isMiracastTakeover(context)) {
-                                        createGroup()
-                                    } else {
-                                        startDiscovery()
-                                    }
-                                }
-                            }
+                        val p2p = manager ?: return
+                        val ch = channel ?: return
+                        p2p.requestConnectionInfo(ch) { info ->
+                            if (gen != generation) return@requestConnectionInfo
+                            if (info.groupFormed) cancelDiscoveryRestart() else onGroupDropped?.invoke()
                         }
-                    }
-
-                    WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
-                        val device = intent.getParcelableExtra<WifiP2pDevice>(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE)
-                        Timber.d("This device changed: ${device?.deviceName}, Status: ${device?.status}")
                     }
                 }
             }
         }
-
-        try {
-            // 必须走 ContextCompat：带 flags 的 registerReceiver 重载是 API 26 才有的，
-            // 在 Android 5/6/7 上直接调用会抛 NoSuchMethodError 导致应用一启动就闪退
-            // （minSdk 是 21，这类老电视确实装得上）。
-            // 必须用 RECEIVER_EXPORTED：Wi-Fi P2P 广播由系统发出（跨进程），
-            // NOT_EXPORTED 会导致 Permission Denial 收不到广播。
-            ContextCompat.registerReceiver(
-                context, receiver, intentFilter, ContextCompat.RECEIVER_EXPORTED
-            )
-            Timber.i("Wi-Fi P2P broadcast receiver registered")
-        } catch (e: Exception) {
-            Timber.e(e, "Failed to register Wi-Fi P2P receiver")
-        }
+        // 必须 RECEIVER_EXPORTED：P2P 广播由系统进程发出；走 ContextCompat 兼容 API 21+。
+        ContextCompat.registerReceiver(context, r, filter, ContextCompat.RECEIVER_EXPORTED)
+        receiver = r
     }
-
-    fun stop() {
-        if (!isStarted) return
-
-        try {
-            // 移除本地服务
-            channel?.let { ch ->
-                manager?.clearLocalServices(ch, object : WifiP2pManager.ActionListener {
-                    override fun onSuccess() {
-                        Timber.i("Local services cleared")
-                    }
-
-                    override fun onFailure(reason: Int) {
-                        Timber.w("Failed to clear local services: $reason")
-                    }
-                })
-
-                // 移除组
-                manager?.removeGroup(ch, object : WifiP2pManager.ActionListener {
-                    override fun onSuccess() { Timber.i("Wi-Fi Direct group removed") }
-                    override fun onFailure(reason: Int) { Timber.w("Failed to remove group: $reason") }
-                })
-            }
-
-            // 注销广播接收器
-            receiver?.let {
-                context.unregisterReceiver(it)
-                receiver = null
-            }
-
-            lastConnectAttempt.clear()
-            cancelDiscoveryRestart()
-            channel = null
-            isStarted = false
-            isGroupOwner = false
-            Timber.i("Wi-Fi Direct stopped")
-        } catch (e: Exception) {
-            Timber.e(e, "Error stopping Wi-Fi Direct")
-        }
-    }
-
-    fun isRunning(): Boolean = isStarted
 
     /**
-     * 立即应用接管开关状态。仅在 P2P 已启动时有效。
-     * enabled=true：写 wifi_display_on=0，建立 P2P 组接管 Miracast。
-     * enabled=false：写 wifi_display_on=1，移除 P2P 组还给系统。
+     * 本机是 GO 时，OPPO / Samsung 的系统投屏会发 PBC provision-discovery 并等 GO 回应 connect()，
+     * 不回应对方会超时。所以对未连接的 peer 主动 connect()（2 秒冷却）。仅 APP 模式下才会走到这里。
      */
-    fun applyTakeoverState(enabled: Boolean) {
-        if (!isStarted) return
-        // 先持久化到 SharedPreferences，确保 CONNECTION_CHANGED 回调时 isMiracastTakeover() 读到新值
-        AppSettings.setMiracastTakeover(context, enabled)
-        val target = if (enabled) 0 else 1
-        try {
-            Settings.Global.putInt(context.contentResolver, "wifi_display_on", target)
-            Timber.i("wifi_display_on set to $target (takeover=$enabled)")
-        } catch (e: SecurityException) {
-            Timber.w("Cannot write wifi_display_on: $e")
-        }
+    private fun handlePeersChanged(gen: Int) {
+        val p2p = manager ?: return
         val ch = channel ?: return
-        if (enabled) {
-            if (isGroupOwner) {
-                Timber.i("Already GO, skipping createGroup() for applyTakeoverState")
-            } else {
-                createGroup()
+        p2p.requestPeers(ch) { peers: WifiP2pDeviceList ->
+            if (gen != generation) return@requestPeers
+            val now = System.currentTimeMillis()
+            peers.deviceList.forEach { device ->
+                if (device.status == WifiP2pDevice.CONNECTED) return@forEach
+                val last = lastConnectAttempt[device.deviceAddress] ?: 0L
+                if (now - last < 2_000L) return@forEach
+                lastConnectAttempt[device.deviceAddress] = now
+                Timber.i("connect() to ${device.deviceName} (${device.deviceAddress}) status=${device.status}")
+                val config = WifiP2pConfig().apply {
+                    deviceAddress = device.deviceAddress
+                    wps.setup = WpsInfo.PBC
+                }
+                try {
+                    p2p.connect(ch, config, object : WifiP2pManager.ActionListener {
+                        override fun onSuccess() = Timber.i("connect() sent for ${device.deviceName}")
+                        override fun onFailure(reason: Int) {
+                            Timber.w("connect() failed for ${device.deviceName}: $reason")
+                            lastConnectAttempt.remove(device.deviceAddress)
+                        }
+                    })
+                } catch (e: SecurityException) {
+                    Timber.w("connect() denied: $e")
+                }
             }
-        } else {
-            manager?.removeGroup(ch, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() { Timber.i("P2P group removed (takeover off)") }
-                override fun onFailure(reason: Int) { Timber.w("removeGroup failed: $reason") }
-            })
         }
-    }
-
-    /** Drop the current sender's P2P link. CONNECTION_CHANGED will rebuild the group. */
-    fun disconnectSender() {
-        val ch = channel ?: return
-        manager?.removeGroup(ch, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() {
-                Timber.i("Miracast sender disconnected; waiting for CONNECTION_CHANGED to rebuild group")
-            }
-            override fun onFailure(reason: Int) {
-                Timber.w("Miracast disconnect group failed: $reason")
-            }
-        })
     }
 }

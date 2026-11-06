@@ -101,8 +101,7 @@
     <string name="status_miracast_checking">正在检查 Windows / 安卓屏幕镜像功能…</string>
     <string name="status_miracast_advertising">Miracast 发现功能已配置。Windows 请按 Win+K，安卓请打开无线投屏；能否被发现还取决于设备驱动。</string>
     <string name="status_miracast_system">系统 Wi-Fi Display 开关已开启。如 Win+K 中仍找不到本机，请打开系统自带的屏幕镜像接收功能再试；开关开启不代表设备一定支持接收。</string>
-    <string name="status_miracast_root_required">Windows / 安卓屏幕镜像暂不可用：未获得 root 授权。如设备自带屏幕镜像接收功能，请先开启；否则需 root 才能启用发现。仍可使用 AirPlay、DLNA 或 VLC 投屏。</string>
-    <string name="status_miracast_failed">Windows / 安卓屏幕镜像配置未成功。请检查系统屏幕镜像、Wi-Fi Direct 支持和 root 授权，重新打开应用重试；仍失败请提供 ADB 日志。其他投屏方式仍可使用。</string>
+    <string name="status_miracast_failed">Windows / 安卓屏幕镜像配置未成功。请检查系统屏幕镜像和 Wi-Fi Direct 支持，重新打开应用重试；仍失败请提供 ADB 日志。其他投屏方式仍可使用。</string>
     <string name="status_miracast_unsupported">此设备未提供 Wi-Fi Direct，无法使用 Windows / 安卓屏幕镜像。可改用 AirPlay、DLNA 或 VLC 投屏。</string>
     <string name="status_miracast_permission">Windows / 安卓屏幕镜像需要“附近的设备”或定位权限。请在系统应用设置中允许后重新打开应用。</string>
     <string name="status_miracast_wifi_disabled">Windows / 安卓屏幕镜像需要 Wi-Fi Direct。请开启 Wi-Fi 后重新打开应用，仅连接网线不足以使用此功能。</string>
@@ -110,4 +109,5 @@
     <string name="miracast_takeover_hint">开启：本电视出现在 Windows 连接（Win+K）列表中。关闭：改由系统内置 Miracast 接收器负责发现。</string>
     <string name="status_miracast_app_active">Miracast 由本应用管理</string>
     <string name="status_miracast_system_active">系统 Miracast 已激活</string>
+    <string name="miracast_clean_reapply">正在清理 Miracast 状态并重新应用…</string>
 </resources>

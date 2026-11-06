@@ -19,6 +19,10 @@ import androidx.lifecycle.lifecycleScope
 import com.weekd.miracastreceiver.R
 import com.weekd.miracastreceiver.discovery.DeviceInfoProvider
 import com.weekd.miracastreceiver.discovery.MdnsAdvertiser
+import com.weekd.miracastreceiver.miracast.MiracastMode
+import com.weekd.miracastreceiver.miracast.MiracastModeStore
+import com.weekd.miracastreceiver.miracast.MiracastRuntime
+import com.weekd.miracastreceiver.miracast.MiracastState
 import com.weekd.miracastreceiver.service.CastReceiverService
 import com.weekd.miracastreceiver.service.ReceiverStatus
 import com.weekd.miracastreceiver.util.AppLanguage
@@ -123,21 +127,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (!wifiPermissionPending) promptOverlayPermissionIfNeeded()
-        refreshMiracastTakeoverSwitch()
-    }
-
-    private fun refreshMiracastTakeoverSwitch() {
-        val wfdOn = Settings.Global.getInt(contentResolver, "wifi_display_on", 1)
-        val appIsControlling = wfdOn == 0
-        switchMiracastTakeover.setOnCheckedChangeListener(null)
-        switchMiracastTakeover.isChecked = appIsControlling
-        switchMiracastTakeover.setOnCheckedChangeListener { _, isChecked ->
-            Timber.i("Miracast takeover set to $isChecked")
-            sendBroadcast(Intent(CastReceiverService.ACTION_SYNC_MIRACAST_TAKEOVER).apply {
-                putExtra(CastReceiverService.EXTRA_MIRACAST_TAKEOVER, isChecked)
-                setPackage(packageName)
-            })
-        }
+        MiracastRuntime.retryIfNeeded(this)
     }
 
     /**
@@ -217,8 +207,20 @@ class MainActivity : AppCompatActivity() {
             Timber.i("Return to app after cast set to $isChecked")
         }
 
-        // Miracast 接管开关：onResume 里统一读系统值并绑定监听器
-        refreshMiracastTakeoverSwitch()
+        // Miracast 接管开关：APP 模式 = checked，SYSTEM 模式 = unchecked
+        switchMiracastTakeover.isChecked = MiracastModeStore.get(this) == MiracastMode.APP
+        switchMiracastTakeover.setOnCheckedChangeListener { _, isChecked ->
+            val mode = if (isChecked) MiracastMode.APP else MiracastMode.SYSTEM
+            Timber.i("Miracast mode set to $mode")
+            MiracastRuntime.requestMode(this, mode)
+        }
+        // 长按：保持模式不变，但清理残留状态后重新建组（排查连不上时用）
+        switchMiracastTakeover.setOnLongClickListener {
+            Timber.i("Miracast long-press: clean and reapply")
+            MiracastRuntime.cleanAndReapply(this)
+            Toast.makeText(this, R.string.miracast_clean_reapply, Toast.LENGTH_SHORT).show()
+            true
+        }
 
         // 界面语言
         findViewById<View>(R.id.setting_language).setOnClickListener { showLanguageDialog() }
@@ -307,33 +309,50 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateStatus() {
+        // 服务状态：轮询
         lifecycleScope.launch {
             while (true) {
                 val service = ReceiverStatus.service
-                val miracast = ReceiverStatus.miracast
                 tvStatus.setText(when (service) {
                     ReceiverStatus.Service.STARTING -> R.string.status_service_starting
                     ReceiverStatus.Service.WAITING_NETWORK -> R.string.status_waiting_network
                     ReceiverStatus.Service.RUNNING -> R.string.status_receiver_running
                     ReceiverStatus.Service.STOPPED -> R.string.status_receiver_stopped
                 })
-                tvMiracastStatus.visibility = if (service == ReceiverStatus.Service.RUNNING) View.VISIBLE else View.GONE
-                tvMiracastStatus.setText(when (miracast) {
-                    ReceiverStatus.Miracast.CHECKING -> R.string.status_miracast_checking
-                    ReceiverStatus.Miracast.ADVERTISING -> R.string.status_miracast_app_active
-                    ReceiverStatus.Miracast.SYSTEM_MANAGED -> R.string.status_miracast_system_active
-                    ReceiverStatus.Miracast.ROOT_REQUIRED -> R.string.status_miracast_root_required
-                    ReceiverStatus.Miracast.SETUP_FAILED -> R.string.status_miracast_failed
-                    ReceiverStatus.Miracast.UNSUPPORTED -> R.string.status_miracast_unsupported
-                    ReceiverStatus.Miracast.PERMISSION_REQUIRED -> R.string.status_miracast_permission
-                    ReceiverStatus.Miracast.WIFI_DISABLED -> R.string.status_miracast_wifi_disabled
-                })
+                val isRunning = service == ReceiverStatus.Service.RUNNING
+                tvMiracastStatus.visibility = if (isRunning) View.VISIBLE else View.GONE
                 startupProgress.visibility = if (service == ReceiverStatus.Service.STARTING ||
-                    service == ReceiverStatus.Service.WAITING_NETWORK ||
-                    (service == ReceiverStatus.Service.RUNNING && miracast == ReceiverStatus.Miracast.CHECKING))
-                    View.VISIBLE else View.GONE
+                    service == ReceiverStatus.Service.WAITING_NETWORK) View.VISIBLE else View.GONE
                 delay(2000)
             }
+        }
+        // Miracast 状态：直接从状态流收
+        lifecycleScope.launch {
+            MiracastRuntime.state.collect { state ->
+                tvMiracastStatus.setText(miracastStatusRes(state))
+                val isInitOrSwitching = state is MiracastState.Initializing ||
+                    state is MiracastState.Switching
+                if (ReceiverStatus.service == ReceiverStatus.Service.RUNNING) {
+                    startupProgress.visibility = if (isInitOrSwitching) View.VISIBLE else View.GONE
+                }
+            }
+        }
+    }
+
+    private fun miracastStatusRes(state: MiracastState): Int = when (state) {
+        is MiracastState.Initializing -> R.string.status_miracast_checking
+        is MiracastState.Switching -> R.string.status_miracast_checking
+        is MiracastState.SystemOwned -> R.string.status_miracast_system_active
+        is MiracastState.AppActive -> if (state.groupReady) R.string.status_miracast_app_active
+            else R.string.status_miracast_checking
+        is MiracastState.Failed -> when (state.error) {
+            com.weekd.miracastreceiver.miracast.MiracastError.PERMISSION_MISSING ->
+                R.string.status_miracast_permission
+            com.weekd.miracastreceiver.miracast.MiracastError.WIFI_OFF ->
+                R.string.status_miracast_wifi_disabled
+            com.weekd.miracastreceiver.miracast.MiracastError.UNSUPPORTED ->
+                R.string.status_miracast_unsupported
+            else -> R.string.status_miracast_failed
         }
     }
 

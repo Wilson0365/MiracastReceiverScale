@@ -19,7 +19,6 @@ object AppSettings {
     private const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
     private const val KEY_LANGUAGE = "language"
     private const val KEY_RETURN_TO_APP_AFTER_CAST = "return_to_app_after_cast"
-    private const val KEY_MIRACAST_TAKEOVER = "miracast_takeover"
 
     /**
      * 是否开机自动启动接收服务。
@@ -53,20 +52,6 @@ object AppSettings {
 
     fun setReturnToAppAfterCast(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_RETURN_TO_APP_AFTER_CAST, enabled).apply()
-    }
-
-    /**
-     * 是否由本 app 接管 Miracast（Win+K 无线显示）。
-     *
-     * true：app 启动时禁用系统 Miracast 并建立 P2P 组，让 Windows 发现本 app；
-     * app 关闭时还原系统 Miracast。
-     * false：不干预系统 Miracast，app 退回纯接收角色。
-     */
-    fun isMiracastTakeover(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_MIRACAST_TAKEOVER, false)
-
-    fun setMiracastTakeover(context: Context, enabled: Boolean) {
-        prefs(context).edit().putBoolean(KEY_MIRACAST_TAKEOVER, enabled).apply()
     }
 
     private fun prefs(context: Context) =
