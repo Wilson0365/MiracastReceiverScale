@@ -604,6 +604,13 @@ class PlayerActivity : AppCompatActivity() {
                 return true
             }
         }
+        // 比例浮层可见时拦截音量键 ACTION_UP，防止系统音量条弹出
+        if (event.action == KeyEvent.ACTION_UP && !isDialogShowing &&
+            scaleControlOverlay.visibility == View.VISIBLE &&
+            (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            return true
+        }
+        }
         if (event.action == KeyEvent.ACTION_DOWN && !isCurrentImage() && !isDialogShowing) {
             val isForwardKey = event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
                 event.keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD
