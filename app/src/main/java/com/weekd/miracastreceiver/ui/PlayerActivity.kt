@@ -593,6 +593,17 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 return true
             }
+            // 比例浮层显示时左右键用于水平平移画面
+            if (scaleControlOverlay.visibility == View.VISIBLE &&
+                (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+                val direction = if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
+                val isAccelerated = event.repeatCount > 10
+                if (::scaleManager.isInitialized) {
+                    scaleManager.panHorizontal(direction, isAccelerated)
+                    applyRotation()
+                }
+                return true
+            }
         }
         if (event.action == KeyEvent.ACTION_DOWN && !isCurrentImage() && !isDialogShowing) {
             val isForwardKey = event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
@@ -1361,17 +1372,21 @@ class PlayerActivity : AppCompatActivity() {
             }
         } else 1f
         val totalFit = fit * extraScale
-        // Clamp pan offset to visible region: scaled content height minus view height, halved.
+        // Clamp pan offsets to visible region.
         val scaledContentH = rotatedH * totalFit
         val maxOffsetY = ((scaledContentH - viewH) / 2f).coerceAtLeast(0f)
         val clampedOffsetY = (sm?.offsetY ?: 0f).coerceIn(-maxOffsetY, maxOffsetY)
         sm?.let { if (it.offsetY != clampedOffsetY) it.forceOffsetY(clampedOffsetY) }
+        val scaledContentW = rotatedW * totalFit
+        val maxOffsetX = ((scaledContentW - viewW) / 2f).coerceAtLeast(0f)
+        val clampedOffsetX = (sm?.offsetX ?: 0f).coerceIn(-maxOffsetX, maxOffsetX)
+        sm?.let { if (it.offsetX != clampedOffsetX) it.forceOffsetX(clampedOffsetX) }
         val matrix = Matrix().apply {
             postScale(w / viewW, h / viewH)
             postTranslate(-w * crop.centerX(), -h * crop.centerY())
             postRotate(rotationDegrees.toFloat())
             postScale(totalFit, totalFit)
-            postTranslate(viewW / 2f, viewH / 2f + clampedOffsetY)
+            postTranslate(viewW / 2f + clampedOffsetX, viewH / 2f + clampedOffsetY)
         }
         texture.setTransform(matrix)
         texture.invalidate()
