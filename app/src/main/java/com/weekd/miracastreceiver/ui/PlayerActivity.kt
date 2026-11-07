@@ -582,7 +582,7 @@ class PlayerActivity : AppCompatActivity() {
                 hideStreamInfo()
                 return true
             }
-            // 比例浮层显示时上下键用于垂直平移，音量键用于水平平移
+            // 比例浮层显示时：上下键垂直平移；左右键长按水平平移（单击放行给焦点系统切换比例）
             if (scaleControlOverlay.visibility == View.VISIBLE &&
                 (event.keyCode == KeyEvent.KEYCODE_DPAD_UP || event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN)) {
                 val direction = if (event.keyCode == KeyEvent.KEYCODE_DPAD_UP) -1 else 1
@@ -594,8 +594,9 @@ class PlayerActivity : AppCompatActivity() {
                 return true
             }
             if (scaleControlOverlay.visibility == View.VISIBLE &&
-                (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
-                val direction = if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) -1 else 1
+                event.repeatCount > 0 &&
+                (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+                val direction = if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
                 val isAccelerated = event.repeatCount > 10
                 if (::scaleManager.isInitialized) {
                     scaleManager.panHorizontal(direction, isAccelerated)
@@ -603,13 +604,6 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 return true
             }
-        }
-        // 比例浮层可见时拦截音量键 ACTION_UP，防止系统音量条弹出
-        if (event.action == KeyEvent.ACTION_UP && !isDialogShowing &&
-            scaleControlOverlay.visibility == View.VISIBLE &&
-            (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
-            return true
-        }
         }
         if (event.action == KeyEvent.ACTION_DOWN && !isCurrentImage() && !isDialogShowing) {
             val isForwardKey = event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
