@@ -76,6 +76,28 @@ TCP 连上 7236，但没走到 PLAY（streamStarted=false）
 
 两套服务都调 `WifiP2pManager`，操作同一个 `wpa_supplicant`。没有互斥锁，完全靠时序竞争。这使得两者自然共存：自定义 app 用于日常投屏，TV 内置投屏 app 打开时自动接管，关掉后下次投屏自动回到自定义播放器。
 
+### 另一条路：系统处理 P2P，app 只接流（待验证）
+
+> 这是一个待测试的替代架构方向，记录在此。
+
+当 app 调 `removeGroup()` 让出 P2P 控制权后，实测发现系统 Miracast 服务接管了连接——而投屏画面依然进入了自定义播放器。分析如下：
+
+```
+takeover OFF：
+  app 写 wifi_display_on=1 + 调 removeGroup()
+    → P2P 组消失，系统 Miracast 服务拿回控制权
+    → OPPO 再投屏时，系统服务处理 P2P 握手
+      （系统签名有权限授权 UserAuthorizingJoinState）
+    → 连接成功后，RTSP 流打到 WfdServer（7236 端口仍在监听）
+    → 自定义 PlayerActivity 播放 → 可以调画面比例 ✓
+```
+
+**关键洞察**：app 做了一件正确的事——让路。系统负责 P2P 握手这道难题（需要系统签名权限），app 只负责接收 RTSP 流并渲染。两者各司其职。
+
+**真正的目标**：不在于谁处理 P2P 连接，而在于**画面进自己的 player**——这样才能调节比例。如果系统 Miracast 处理握手、流量进自定义 PlayerActivity，同样满足需求，且更简单稳定（绕开了 P2P GO 竞争、WFD IE 权限等问题）。
+
+这条路计划在独立分支 `experiment/system-p2p-custom-player` 验证。
+
 ---
 
 ## 安装
