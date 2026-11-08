@@ -1,243 +1,148 @@
-# Miracast Receiver - Android TV 投屏应用
+# Miracast Receiver — Android TV 投屏接收端
 
-## 项目简介
+运行在 Android TV（小米等）上的 Miracast/WFD Sink 应用。核心目标：让自定义播放器成为投屏目标，从而能调整画面比例、做水平平移等系统投屏做不到的事。
 
-这是一个运行在 Android TV 上的投屏接收端应用，支持 Android 手机、iPhone、Windows 和 Mac 电脑投屏到电视。
+---
 
-## 当前状态
+## 功能特性
 
-**阶段 0 - MVP 版本已完成**
+- **APP 模式**：完全接管 Wi-Fi Display，通过 Wi-Fi Direct P2P 自动接收手机投屏，走自定义播放器
+- **SYSTEM 模式**：退出占用，将投屏控制权还给电视系统原生服务
+- **autoConnectAndroid**：无需用户操作，TV 自动发现并连接 OPPO/Vivo/Xiaomi/Samsung 手机
+- **P2P 自愈**：RTSP 握手失败（"传输通道被占用"）自动重置 P2P 组，无需手动重启手机
+- **DriftWatch**：监测系统覆盖 `wifi_display_on` 开关，一次漂移自动修复，连续两次让步给系统
+- **遥控器画面调整**：按 MENU 键打开比例控制浮层，支持多种宽高比、垂直/水平平移、精细对齐
 
-已实现的功能：
+---
 
-- ✅ Android TV 基础框架搭建
-- ✅ 主界面（等待连接页面）
-- ✅ mDNS 服务广播
-- ✅ 网络工具类（IP 获取、连接码生成）
-- ✅ 设备信息提供器
-- ✅ 编解码能力检测
-- ✅ 后台前台服务
-- ✅ 播放页面框架
-- ✅ 连接确认页面框架
+## 遥控器操作
 
-待实现的核心功能：
-
-- ⏳ WebRTC 信令服务器
-- ⏳ WebRTC PeerConnection 接收
-- ⏳ 视频流解码和渲染
-- ⏳ 音频播放
-- ⏳ Android 发送端应用
-
-## 技术栈
-
-### 电视端（已完成基础框架）
-
-- **语言**: Kotlin
-- **最低 SDK**: Android 5.0 (API 21)
-- **目标 SDK**: Android 14 (API 36)
-- **UI 框架**: Android TV Leanback
-- **网络**: OkHttp, mDNS/NSD
-- **视频**: ExoPlayer, MediaCodec
-- **实时通信**: WebRTC
-- **日志**: Timber
-
-### 依赖库
-
-```gradle
-// AndroidX
-androidx.core:core-ktx:1.15.0
-androidx.leanback:leanback:1.2.0-alpha04
-androidx.tvprovider:tvprovider:1.1.0-alpha01
-
-// 协程
-kotlinx-coroutines-android:1.9.0
-
-// 网络
-okhttp3:okhttp:4.12.0
-retrofit2:retrofit:2.11.0
-
-// 视频播放
-androidx.media3:media3-exoplayer:1.5.0
-
-// WebRTC
-org.webrtc:google-webrtc:1.0.32006
-
-// 日志
-timber:5.0.1
-```
-
-## 项目结构
-
-```
-MiracastReceiver/
-├── app/src/main/
-│   ├── java/com/weekd/miracastreceiver/
-│   │   ├── MiracastApp.kt              # Application 类
-│   │   ├── ui/                         # UI 层
-│   │   │   ├── MainActivity.kt         # 主界面（等待连接）
-│   │   │   ├── PlayerActivity.kt       # 播放界面
-│   │   │   └── ConnectActivity.kt      # 连接确认界面
-│   │   ├── discovery/                  # 服务发现
-│   │   │   ├── MdnsAdvertiser.kt       # mDNS 广播
-│   │   │   └── DeviceInfoProvider.kt   # 设备信息
-│   │   ├── signaling/                  # 信令协议
-│   │   │   └── MessageProtocol.kt      # 消息定义
-│   │   ├── stream/                     # 流处理
-│   │   │   ├── WebRtcReceiver.kt       # WebRTC 接收
-│   │   │   └── VideoRenderer.kt        # 视频渲染
-│   │   ├── security/                   # 安全
-│   │   │   └── PinCodeManager.kt       # PIN 码管理
-│   │   ├── service/                    # 后台服务
-│   │   │   └── CastReceiverService.kt  # 投屏服务
-│   │   └── utils/                      # 工具类
-│   │       ├── NetworkUtils.kt         # 网络工具
-│   │       └── CodecUtils.kt           # 编解码工具
-│   ├── res/
-│   │   ├── layout/                     # 布局文件
-│   │   ├── values/                     # 资源文件
-│   │   └── drawable/                   # 图标资源
-│   └── AndroidManifest.xml
-├── build.gradle.kts
-└── settings.gradle.kts
-```
-
-## 构建说明
-
-### 环境要求
-
-- Android Studio 2026.1+
-- Android SDK API 36
-- JDK 17+
-- Gradle 8.11.1
-
-### 构建命令
-
-```bash
-# 构建 Debug APK
-./gradlew assembleDebug
-
-# 构建 Release APK
-./gradlew assembleRelease
-
-# 安装到设备
-./gradlew installDebug
-
-# 清理构建
-./gradlew clean
-```
-
-### 输出位置
-
-```
-app/build/outputs/apk/debug/app-debug.apk
-```
-
-## 运行说明
-
-### 在 Android TV 模拟器上运行
-
-1. 打开 Android Studio
-2. Tools → Device Manager
-3. 创建 Android TV 设备（选择 API 36）
-4. 启动模拟器
-5. 运行应用
-
-### 在真实 Android TV 设备上运行
-
-1. 在电视上启用开发者选项
-2. 启用 USB 调试或 Wi-Fi ADB
-3. 连接设备：
-
-```bash
-# USB 连接
-adb devices
-
-# Wi-Fi 连接
-adb connect <TV_IP>:5555
-```
-
-4. 安装 APK：
-
-```bash
-adb install app/build/outputs/apk/debug/app-debug.apk
-```
-
-## 功能说明
-
-### 播放界面遥控器操作
-
-播放界面支持通过遥控器调整画面显示效果。
-
-#### 比例/平移控制
-
-按 **MENU 键** 打开比例控制浮层，浮层打开后：
+MENU 键打开比例控制浮层后：
 
 | 按键 | 功能 |
 |------|------|
-| 左 / 右 | 切换画面比例模式（原始 / 全屏拉伸 / 各种缩放比例） |
-| 上 / 下 | 垂直平移画面 |
-| 长按左 / 长按右 | 水平平移画面（较快） |
-| **按住 OK + 左 / 右** | **水平精细平移画面（较慢，便于精确对齐）** |
-| OK（单独点击） | 确认当前选中的比例模式 |
+| 左 / 右 | 切换比例模式 |
+| 上 / 下 | 垂直平移 |
+| 长按左 / 长按右 | 水平快速平移 |
+| 按住 OK + 左 / 右 | 水平精细平移（慢速，便于精确对齐） |
+| OK（单击） | 确认当前比例 |
 | Back | 关闭浮层 |
 
-> 说明：OK+左右平移结束后松开 OK，不会误触比例模式切换。
+---
 
-#### 旋转控制
+## APP 模式工作原理
 
-画面旋转功能（镜像/图片模式）：按上/下/OK/Enter 呼出旋转按钮，再按 OK 旋转 90°。
+### autoConnectAndroid 连接流程
 
+```
+TV 开 APP 模式
+  └─ discoverPeers()
+       └─ PEERS_CHANGED 广播收到 OPPO/Vivo/Xiaomi/Samsung 设备
+            └─ connect(groupOwnerIntent=15)  ← TV 抢 GO 角色（OPPO 的 intent=14）
+                 └─ P2P-GROUP-FORMATION-SUCCESS  TV 成为 Group Owner
+                      └─ WfdServer 扫描 P2P 子网，连接 Source 的 TCP 7236
+                           └─ RTSP M1–M7 握手
+                                └─ PLAY → 开始推流到自定义播放器
+```
 
+### "传输通道被占用"自动恢复
 
-- 显示设备名称（自动获取）
-- 显示设备 IP 地址
-- 显示 6 位连接码
-- mDNS 服务广播
-- 等待投屏连接状态
+OPPO 等手机在 RTSP 会话没有收到 `TEARDOWN` 就断开时，WFD 状态机会卡在"session active"，拒绝新的连接。之前的表现是必须重启手机。
 
-### mDNS 服务发现
+现在的处理路径：
 
-电视端通过 mDNS 广播以下信息：
+```
+TCP 连上 7236，但没走到 PLAY（streamStarted=false）
+  └─ WfdServer.onSessionFailed 触发
+       └─ MiracastController.scheduleP2pReset()
+            └─ WifiDirectManager.disconnectSender() → removeGroup()
+                 └─ OPPO 收到 P2P disconnect 事件，WFD 状态机重置
+                      └─ onGroupDropped → scheduleRebuild() → 重新 discoverPeers
+                           └─ 15~30s 后自动恢复连接
+```
 
-- 服务类型：`_miracast-receiver._tcp.`
-- 服务名称：设备名称
-- 端口：8080
-- 设备属性：
-  - version: 1.0
-  - platform: android-tv
-  - protocol: webrtc,rtsp
-  - code: 连接码
-  - ip: IP 地址
-  - h264/h265: 支持的编解码器
+### APP 模式与系统投屏的共存
 
-## 下一步开发计划
+**现象**：APP 模式下打开系统投屏 app，投屏走系统；再回到自定义 app，走自定义播放器。
 
-### 阶段 1：WebRTC 信令服务器
+**原因**：
 
-- [ ] HTTP/WebSocket 信令服务器
-- [ ] 连接请求处理
-- [ ] SDP Offer/Answer 交换
-- [ ] ICE Candidate 交换
+`wifi_display_on = 1` 不是锁，只是"WFD 子系统已启用"的全局标志。系统投屏服务看到它是 1，同样认为功能已开启，正常工作。
 
-### 阶段 2：WebRTC 接收和播放
+实际控制权取决于**谁先占住 P2P Group Owner 角色**，这是 `wpa_supplicant` 层的竞争：
 
-- [ ] PeerConnection 创建和配置
-- [ ] 视频轨道接收
-- [ ] 音频轨道接收
-- [ ] SurfaceView 渲染
-- [ ] AudioTrack 播放
+- **自定义 app 运行时**：app 持续跑 `discoverPeers`，手机广播出现时抢先调 `connect(groupOwnerIntent=15)`，TV 赢得 GO → 投屏走自定义播放器
+- **系统投屏 app 打开时**：系统服务主动发起 `discoverPeers + connect()`，它比被动等待的自定义 app 更快，抢先完成 P2P 协商 → 投屏走系统播放器
 
-### 阶段 3：Android 发送端
+两套服务都调 `WifiP2pManager`，操作同一个 `wpa_supplicant`。没有互斥锁，完全靠时序竞争。这使得两者自然共存：自定义 app 用于日常投屏，TV 内置投屏 app 打开时自动接管，关掉后下次投屏自动回到自定义播放器。
 
-- [ ] Android 发送端应用
-- [ ] MediaProjection 屏幕采集
-- [ ] MediaCodec 编码
-- [ ] WebRTC 推流
+---
+
+## 安装
+
+### 环境要求
+
+- Android Studio 2024.1+ 或命令行 Gradle
+- Android SDK API 21+
+- JDK 17+
+
+### 构建
+
+```bash
+# Debug APK（推荐用于开发调试）
+./gradlew app:assembleDebug
+
+# Release APK
+./gradlew app:assembleRelease
+```
+
+APK 输出：
+```
+app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
+app/build/outputs/apk/release/app-armeabi-v7a-release.apk
+```
+
+### 安装到电视
+
+```bash
+# 先连上电视（Wi-Fi ADB）
+adb connect 192.168.1.2:5555
+
+# 安装
+adb install app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
+```
+
+### 权限
+
+应用只需要 `WRITE_SECURE_SETTINGS`（通过 adb 授权，无需 root）：
+
+```bash
+adb shell pm grant com.weekd.miracastreceiver android.permission.WRITE_SECURE_SETTINGS
+```
+
+---
+
+## 技术栈
+
+| 组件 | 说明 |
+|------|------|
+| Wi-Fi Direct | `WifiP2pManager`，TV 作为 GO，groupOwnerIntent=15 |
+| WFD 协议 | 主动连接 Source 的 TCP 7236，跑 RTSP M1–M7 |
+| RTP 接收 | UDP 19000，接收 MPEG-2 TS |
+| 状态管理 | `MiracastController` + `MiracastRuntime` StateFlow |
+| 后台服务 | `CastReceiverService` 前台服务 |
+| 日志 | Timber |
+
+---
+
+## 已知限制
+
+- **Windows/Mac 投屏**：依赖 WFD IE 广播（需要 `setWFDInfo` 的 signature 级权限），无 root/系统签名时 Windows 端看不到本机。手机端（OPPO/Samsung 等）不依赖 WFD IE，正常使用。
+- **非目标品牌手机**：`autoConnectAndroid` 只自动连接 OPPO/Vivo/Xiaomi/Samsung，其他品牌需手动连接。
+- **P2P 恢复延迟**：握手失败后的自动恢复约需 15~30s（P2P 重建 + OPPO 重新响应扫描）。
+
+---
 
 ## 许可证
 
 本项目仅用于学习和研究目的。
-
-## 联系方式
-
-如有问题，请查看开发计划文档或提交 Issue。
