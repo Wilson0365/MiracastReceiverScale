@@ -1,6 +1,7 @@
 package com.weekd.miracastreceiver.miracast
 
 import android.content.Context
+import android.net.wifi.p2p.WifiP2pInfo
 import kotlinx.coroutines.*
 import timber.log.Timber
 import java.net.InetSocketAddress
@@ -30,11 +31,12 @@ class WfdServer(
     private val port: Int = 7236,
     private val rtpPort: Int = 19000
 ) {
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var scope: CoroutineScope? = null
 
     @Volatile
     private var isRunning = false
     @Volatile private var reconnectAfterMs = 0L
+    @Volatile private var closedByUs = false
 
     private var sessionHandler: WfdSessionHandler? = null
     private var rtpReceiver: RtpReceiver? = null
@@ -54,9 +56,15 @@ class WfdServer(
 
     companion object {
         private const val SCAN_INTERVAL_MS = 3_000L
-        private const val CONNECT_TIMEOUT_MS = 400
+        private const val SCAN_INTERVAL_EAGER_MS = 1_000L  // P2P 刚建好时的高频间隔
+        private const val EAGER_WINDOW_MS = 20_000L        // 高频扫描持续时间
+        private const val CONNECT_TIMEOUT_MS = 1500
         private const val SCAN_CHUNK = 32          // 每批并发探测的地址数
     }
+
+    @Volatile private var groupFormedAtMs = 0L
+    @Volatile private var groupOwnerAddress: String? = null
+    @Volatile private var tvIsGroupOwner = true
 
     @Volatile private var triggerImmediate = false
 
@@ -66,12 +74,16 @@ class WfdServer(
             return
         }
         isRunning = true
+        closedByUs = false
+        val s = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        scope = s
         Timber.i("WFD session starter running (will dial source:$port, RTP on $rtpPort)")
 
-        scope.launch {
+        s.launch {
             while (isRunning) {
                 try {
-                    if (!triggerImmediate && android.os.SystemClock.elapsedRealtime() < reconnectAfterMs) {
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (!triggerImmediate && now < reconnectAfterMs) {
                         delay(SCAN_INTERVAL_MS)
                         continue
                     }
@@ -83,7 +95,11 @@ class WfdServer(
                 } catch (e: Exception) {
                     if (isRunning) Timber.e(e, "WFD session loop error")
                 }
-                if (isRunning) delay(SCAN_INTERVAL_MS)
+                if (!isRunning) break
+                // P2P 刚建好时高频扫描，等 OPPO 的 7236 就绪
+                val elapsed = android.os.SystemClock.elapsedRealtime() - groupFormedAtMs
+                val interval = if (elapsed < EAGER_WINDOW_MS) SCAN_INTERVAL_EAGER_MS else SCAN_INTERVAL_MS
+                delay(interval)
             }
         }
     }
@@ -97,7 +113,32 @@ class WfdServer(
      * 所以扫描成功的那条 socket 直接用作会话连接。
      */
     private suspend fun dialSource(): Socket? = coroutineScope {
+        // p2p0 接口在 P2P-GROUP-FORMATION-SUCCESS 后还需要几秒才拿到 DHCP 地址，
+        // 轮询等它就绪，最多等 15 秒，再开始扫描。
+        val subnetDeadline = android.os.SystemClock.elapsedRealtime() + 15_000L
+        while (isRunning && p2pSubnetPrefix() == null) {
+            if (android.os.SystemClock.elapsedRealtime() >= subnetDeadline) {
+                Timber.w("WFD: dialSource timed out waiting for p2p subnet")
+                return@coroutineScope null
+            }
+            Timber.d("WFD: p2p subnet not ready yet, retrying in 500ms")
+            delay(500)
+        }
+
+        // TV 不是 GO 时（罕见，OPPO 抢赢了），Source 在 goAddr（通常是 .1）。
+        // 直接拨，不用扫全段。
+        if (!tvIsGroupOwner) {
+            val goAddr = groupOwnerAddress
+            if (goAddr != null) {
+                Timber.i("WFD: TV is P2P client, dialing GO directly at $goAddr")
+                val s = tryConnect(goAddr)
+                if (s != null) return@coroutineScope s
+                Timber.w("WFD: direct dial to GO $goAddr failed")
+            }
+        }
+
         val prefix = p2pSubnetPrefix() ?: return@coroutineScope null
+        Timber.d("WFD: scanning subnet ${prefix}2-254 for source on port $port")
 
         for (chunkStart in 2..254 step SCAN_CHUNK) {
             if (!isRunning) return@coroutineScope null
@@ -113,13 +154,19 @@ class WfdServer(
                 return@coroutineScope session
             }
         }
+        Timber.d("WFD: scan complete, no source found on port $port")
         null
     }
 
-    private fun tryConnect(ip: String): Socket? = try {
-        Socket().also { it.connect(InetSocketAddress(ip, port), CONNECT_TIMEOUT_MS) }
-    } catch (e: Exception) {
-        null
+    private fun tryConnect(ip: String): Socket? {
+        val s = Socket()
+        return try {
+            s.connect(InetSocketAddress(ip, port), CONNECT_TIMEOUT_MS)
+            s
+        } catch (e: Exception) {
+            runCatching { s.close() }
+            null
+        }
     }
 
     /**
@@ -154,6 +201,7 @@ class WfdServer(
         rtpReceiver = receiver
 
         var streamStarted = false
+        closedByUs = false
         val handler = WfdSessionHandler(context, socket, rtpPort).apply {
             onSessionEstablished = { onConnectionEstablished?.invoke(it) }
             onStreamStart = {
@@ -170,9 +218,9 @@ class WfdServer(
             receiver.stop()
             rtpReceiver = null
             sessionHandler = null
-            // 如果连上了 7236 但没走到 PLAY，说明 OPPO 的 WFD 通道没释放或握手失败。
-            // 通知 Controller 拆 P2P 组，强制 OPPO 重置状态机。
-            if (!streamStarted) {
+            // 只有在没收到 PLAY 且不是我们主动关闭时，才认为是握手失败（"通道占用"）。
+            // stop() 和 disconnectSender() 调用时 closedByUs=true，不触发 P2P reset。
+            if (!streamStarted && !closedByUs) {
                 Timber.w("WFD: session ended without PLAY (channel busy or handshake failed), requesting P2P reset")
                 onSessionFailed?.invoke()
             }
@@ -180,26 +228,40 @@ class WfdServer(
     }
 
     /** P2P 组已形成，立刻触发一次扫描，不等 3 秒周期。 */
-    fun triggerScan() {
-        triggerImmediate = true
-        Timber.i("WFD: P2P group formed, triggering immediate scan")
+    fun triggerScan(info: WifiP2pInfo) {
+        groupFormedAtMs = android.os.SystemClock.elapsedRealtime()
+        tvIsGroupOwner = info.isGroupOwner
+        groupOwnerAddress = info.groupOwnerAddress?.hostAddress
+        // Only trigger immediate if not inside a cooldown window (e.g. from disconnectSender).
+        if (android.os.SystemClock.elapsedRealtime() >= reconnectAfterMs) {
+            triggerImmediate = true
+        }
+        Timber.i("WFD: P2P group formed, isGO=$tvIsGroupOwner goAddr=$groupOwnerAddress, triggering immediate scan")
     }
 
     fun stop() {
         isRunning = false
-        sessionHandler?.close()
+        closedByUs = true
+        // Send TEARDOWN before closing the socket so Source can clean up its WFD state machine.
+        // disconnectSender() is synchronous on the caller thread here (no scope needed).
+        runCatching { sessionHandler?.disconnectSender() }
         sessionHandler = null
         rtpReceiver?.stop()
         rtpReceiver = null
-        scope.cancel()
+        scope?.cancel()
+        scope = null
         Timber.i("WFD session starter stopped")
     }
 
     fun isRunning(): Boolean = isRunning
 
+    /** Returns true when a Source is connected and PLAY has been acknowledged (stream is live). */
+    fun hasActiveSession(): Boolean = sessionHandler != null
+
     fun disconnectSender() {
+        closedByUs = true
         reconnectAfterMs = android.os.SystemClock.elapsedRealtime() + 5000
         val current = sessionHandler
-        scope.launch { runCatching { current?.disconnectSender() } }
+        scope?.launch { runCatching { current?.disconnectSender() } }
     }
 }

@@ -185,6 +185,12 @@ class WfdSessionHandler(
 
     // ─── 处理 Source 对我们请求的响应 ────────────────────────────────────────
     private fun handleResponse(msg: String) {
+        val statusCode = msg.substringAfter("RTSP/1.0 ").substringBefore(' ').toIntOrNull() ?: 0
+        if (statusCode != 200) {
+            Timber.w("WFD: source rejected our request with status $statusCode, closing session")
+            close()
+            return
+        }
         val session = header(msg, "Session")?.substringBefore(';')
         if (!session.isNullOrBlank() && sessionId.isEmpty()) {
             sessionId = session

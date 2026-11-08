@@ -82,18 +82,25 @@ class RtpReceiver(
 
         active = this
 
+        // Bind the socket synchronously so stop() can always close it, even if called
+        // before the receive coroutine starts running.
+        val sock = try {
+            DatagramSocket(port).apply {
+                runCatching { receiveBufferSize = 1024 * 1024 }
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to bind UDP $port for RTP")
+            onError?.invoke("RTP 接收启动失败: ${e.message}")
+            return
+        }
+        socket = sock
+        isRunning = true
+        Timber.i("RTP Receiver listening on UDP $port (expecting MPEG-2 TS, PT=33), recvBuf=${sock.receiveBufferSize}")
+
         scope.launch { runDecoder() }
 
         scope.launch {
             try {
-                socket = DatagramSocket(port).apply {
-                    // 默认接收缓冲只有几十 KB，2.5Mbps 的流稍有调度延迟就会溢出丢包
-                    runCatching { receiveBufferSize = 1024 * 1024 }
-                }
-                isRunning = true
-                Timber.i("RTP Receiver listening on UDP $port (expecting MPEG-2 TS, PT=33), " +
-                    "recvBuf=${socket?.receiveBufferSize}")
-
                 val buffer = ByteArray(65536)
                 val packet = DatagramPacket(buffer, buffer.size)
                 var loggedFirst = false
@@ -102,7 +109,7 @@ class RtpReceiver(
                 while (isRunning) {
                     try {
                         packet.length = buffer.size    // receive() 会缩短 length，每次要复位
-                        socket?.receive(packet)
+                        sock.receive(packet)
                         if (packet.length <= 0) continue
 
                         packetsReceived++
@@ -148,8 +155,8 @@ class RtpReceiver(
                     }
                 }
             } catch (e: Exception) {
-                Timber.e(e, "Failed to start RTP Receiver")
-                onError?.invoke("RTP 接收启动失败: ${e.message}")
+                Timber.e(e, "RTP receive loop failed")
+                onError?.invoke("RTP 接收失败: ${e.message}")
                 isRunning = false
             }
         }

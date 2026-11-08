@@ -175,6 +175,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var mirrorRotateTexture: TextureView
     private var mirrorHolderSurface: Surface? = null
     private var mirrorTextureSurface: Surface? = null
+    private var mirrorHolderCallback: android.view.SurfaceHolder.Callback? = null
     /** 点播视频旋转用的 TextureView，挂在 PlayerView 的 overlay 层（画面之上、控制条之下）。 */
     private var exoRotateLayer: FrameLayout? = null
     private var exoRotateTexture: TextureView? = null
@@ -772,15 +773,18 @@ class PlayerActivity : AppCompatActivity() {
             tvStatus.text = if (mirrorSurface == null) waitingText else activeText
         }
 
-        mirrorSurfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) = publish(holder)
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = publish(holder)
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
+        mirrorHolderCallback?.let { mirrorSurfaceView.holder.removeCallback(it) }
+        val cb = object : android.view.SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: android.view.SurfaceHolder) = publish(holder)
+            override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) = publish(holder)
+            override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
                 Timber.i("Mirror surface destroyed")
                 mirrorHolderSurface = null
                 updateMirrorSurfaceTarget()
             }
-        })
+        }
+        mirrorHolderCallback = cb
+        mirrorSurfaceView.holder.addCallback(cb)
         mirrorSurfaceView.post { publish(mirrorSurfaceView.holder) }
         startMirrorAspectFitUpdates()
     }
@@ -1689,8 +1693,19 @@ class PlayerActivity : AppCompatActivity() {
         streamInfoJob?.cancel()
         streamInfoJob = null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // 补发断开通知：onBackPressed 已发过，但系统回收、ACTION_STOP 等路径不经过它。
+        // Controller.disconnectSender() 内部做幂等（closedByUs 守卫），重复发无副作用。
+        if (isFinishing && isMiracastSession) {
+            sendBroadcast(Intent("com.weekd.miracastreceiver.DISCONNECT_SENDER").apply {
+                setPackage(packageName)
+                putExtra("miracast", true)
+            })
+        }
         // RTP 接收器归 WfdServer 所有（会话结束时由它停止），这里不要碰
-        mirrorSurface = null
+        // 只清自己发布的那个，避免新 Activity 已经发布新 Surface 后被旧实例踩掉
+        if (mirrorSurface === mirrorHolderSurface || mirrorSurface === mirrorTextureSurface) {
+            mirrorSurface = null
+        }
         mirrorTextureSurface?.release()
         mirrorTextureSurface = null
         player?.release()

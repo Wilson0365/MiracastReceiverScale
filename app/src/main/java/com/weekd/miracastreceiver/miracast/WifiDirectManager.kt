@@ -58,7 +58,9 @@ class WifiDirectManager(
         private const val GROUP_ATTEMPTS = 3
         private const val DISCOVERY_RESTART_INTERVAL_MS = 90_000L
         private const val DISCOVERY_RETRY_INTERVAL_MS = 3_000L
+        private const val DISCOVERY_RETRY_INTERVAL_FAST_MS = 1_500L  // Wi-Fi 正在扫描/切换时，短暂重试
         private const val DISCOVERY_MAX_RETRIES = 5
+        private const val DISCOVERY_HARD_FAIL_COUNT = 20  // 超过此次数触发 channel 重建
         private const val WFD_CONTROL_PORT = 7236
         private const val CONNECT_MAX_ATTEMPTS = 5   // 每个设备最多尝试5次 connect()
     }
@@ -83,10 +85,16 @@ class WifiDirectManager(
     var onGroupDropped: (() -> Unit)? = null
 
     /** P2P 组刚建立成功（groupFormed 变为 true）。通知 WfdServer 立刻开始扫描。 */
-    var onGroupFormed: (() -> Unit)? = null
+    var onGroupFormed: ((android.net.wifi.p2p.WifiP2pInfo) -> Unit)? = null
 
     /** P2P 开关状态变化（用户关 Wi-Fi 等）。 */
     var onP2pEnabledChanged: ((Boolean) -> Unit)? = null
+
+    /**
+     * discovery 持续失败（超过 [DISCOVERY_HARD_FAIL_COUNT] 次），可能是 Wi-Fi driver 内部状态卡死。
+     * Controller 收到后应执行 close()+open() 重建整个 P2P channel。
+     */
+    var onDiscoveryHardFail: (() -> Unit)? = null
 
     val isOpen: Boolean get() = channel != null
 
@@ -135,6 +143,11 @@ class WifiDirectManager(
         connectAttemptCount.clear()
         discoveryRetryCount = 0
         Timber.i("Wi-Fi Direct closed")
+    }
+
+    /** channel reinit 后重置 discovery 重试计数，使新一轮计数从 0 开始。 */
+    fun resetDiscoveryRetryCount() {
+        discoveryRetryCount = 0
     }
 
     /**
@@ -244,7 +257,6 @@ class WifiDirectManager(
 
     /** 启动 peer discovery（建组之后调用），并定时重启保活。 */
     fun startDiscovery() {
-        connectAttemptCount.clear()   // 新一轮 discovery，重置 connect 护栏计数
         val p2p = manager ?: return
         val ch = channel ?: return
         try {
@@ -257,10 +269,18 @@ class WifiDirectManager(
 
                 override fun onFailure(reason: Int) {
                     discoveryRetryCount++
-                    val delay = if (discoveryRetryCount <= DISCOVERY_MAX_RETRIES) {
-                        DISCOVERY_RETRY_INTERVAL_MS
-                    } else {
-                        DISCOVERY_RESTART_INTERVAL_MS
+                    // discovery 持续失败超过阈值：channel 可能卡死，通知 Controller 重建整个 P2P stack
+                    if (discoveryRetryCount >= DISCOVERY_HARD_FAIL_COUNT) {
+                        Timber.w("Peer discovery hard-failed ($discoveryRetryCount times), requesting channel reinit")
+                        onDiscoveryHardFail?.invoke()
+                        return
+                    }
+                    // reason=0 (ERROR) 通常是 Wi-Fi 正在扫描/切换信道，很快会好，用短间隔重试。
+                    // 超过阈值后才用长间隔，避免持续空转。
+                    val delay = when {
+                        discoveryRetryCount <= DISCOVERY_MAX_RETRIES -> DISCOVERY_RETRY_INTERVAL_FAST_MS
+                        discoveryRetryCount <= DISCOVERY_MAX_RETRIES * 3 -> DISCOVERY_RETRY_INTERVAL_MS
+                        else -> DISCOVERY_RESTART_INTERVAL_MS
                     }
                     Timber.w("Peer discovery failed: $reason — retry $discoveryRetryCount in ${delay}ms")
                     discoveryHandler.removeCallbacks(restartDiscoveryRunnable)
@@ -372,7 +392,7 @@ class WifiDirectManager(
                             if (gen != generation) return@requestConnectionInfo
                             if (info.groupFormed) {
                                 cancelDiscoveryRestart()
-                                onGroupFormed?.invoke()
+                                onGroupFormed?.invoke(info)
                             } else {
                                 onGroupDropped?.invoke()
                             }
@@ -395,64 +415,75 @@ class WifiDirectManager(
             val now = System.currentTimeMillis()
             peers.deviceList.forEach { device ->
                 Timber.d("peer: ${device.deviceName} status=${device.status}")
-                if (device.status == WifiP2pDevice.CONNECTED) return@forEach
-                val name = device.deviceName?.lowercase() ?: return@forEach
+            }
+            // 同一时刻只能协商一个 P2P 连接，选第一个满足条件的 target 设备
+            val target = peers.deviceList.firstOrNull { device ->
+                // 跳过已连接、已邀请（协商中）或正在接入的设备
+                if (device.status == WifiP2pDevice.CONNECTED) return@firstOrNull false
+                if (device.status == WifiP2pDevice.INVITED) return@firstOrNull false
+                val name = device.deviceName?.lowercase() ?: return@firstOrNull false
                 val isOppoVivo = name.contains("oppo") || name.contains("vivo")
                 val isXiaomi = name.contains("xiaomi")
                 val isSamsung = name.contains("samsung") || name.contains("galaxy") || name.contains("sm-")
-                if (!isOppoVivo && !isXiaomi && !isSamsung) {
-                    Timber.d("skip non-target peer: ${device.deviceName}")
-                    return@forEach
-                }
+                if (!isOppoVivo && !isXiaomi && !isSamsung) return@firstOrNull false
                 // xiaomi 可能是小米电视（sink=1），检查 wfdInfo；type=3(Dual Role) 当作 source
                 if (isXiaomi) {
                     try {
                         val wfdInfo = device.wfdInfo
                         if (wfdInfo != null) {
+                            val cls = wfdInfo.javaClass
                             val enabled = try {
-                                wfdInfo.javaClass.getMethod("isEnabled").invoke(wfdInfo) as? Boolean ?: false
+                                cls.getMethod("isEnabled").invoke(wfdInfo) as? Boolean ?: false
                             } catch (_: NoSuchMethodException) {
                                 try {
-                                    wfdInfo.javaClass.getMethod("isWfdEnabled").invoke(wfdInfo) as? Boolean ?: false
+                                    cls.getMethod("isWfdEnabled").invoke(wfdInfo) as? Boolean ?: false
                                 } catch (_: NoSuchMethodException) { false }
                             }
-                            if (enabled && wfdInfo.deviceType == 1) {
+                            val deviceType = try {
+                                cls.getMethod("getDeviceType").invoke(wfdInfo) as? Int
+                                    ?: cls.getField("deviceType").get(wfdInfo) as? Int
+                                    ?: -1
+                            } catch (_: Throwable) { -1 }
+                            if (enabled && deviceType == 1) {
                                 Timber.d("skip Xiaomi sink: ${device.deviceName} deviceType=1")
-                                return@forEach
+                                return@firstOrNull false
                             }
                         }
-                    } catch (e: Exception) {
+                    } catch (e: Throwable) {
                         Timber.d("wfdInfo check failed for ${device.deviceName}: $e")
                     }
                 }
                 val last = lastConnectAttempt[device.deviceAddress] ?: 0L
-                if (now - last < 2_000L) return@forEach
+                if (now - last < 2_000L) return@firstOrNull false
                 val attempts = connectAttemptCount[device.deviceAddress] ?: 0
                 if (attempts >= CONNECT_MAX_ATTEMPTS) {
                     Timber.d("skip ${device.deviceName}: reached max connect attempts ($attempts)")
-                    return@forEach
+                    return@firstOrNull false
                 }
-                lastConnectAttempt[device.deviceAddress] = now
-                connectAttemptCount[device.deviceAddress] = attempts + 1
-                Timber.i("connect() #${attempts + 1} → ${device.deviceName} status=${device.status}")
-                val config = WifiP2pConfig().apply {
-                    deviceAddress = device.deviceAddress
-                    wps.setup = WpsInfo.PBC
-                    groupOwnerIntent = 15  // 电视必须赢得 GO 角色，才能接收投屏
-                }
-                try {
-                    p2p.connect(ch, config, object : WifiP2pManager.ActionListener {
-                        override fun onSuccess() = Timber.i("connect() accepted for ${device.deviceName}")
-                        override fun onFailure(reason: Int) {
-                            Timber.w("connect() failed for ${device.deviceName}: $reason")
-                            // 失败立即清除冷却，允许下一次 PEERS_CHANGED 再试
-                            lastConnectAttempt.remove(device.deviceAddress)
-                        }
-                    })
-                } catch (e: SecurityException) {
-                    Timber.w("connect() denied: $e")
-                    lastConnectAttempt.remove(device.deviceAddress)
-                }
+                true
+            } ?: return@requestPeers
+
+            val attempts = connectAttemptCount[target.deviceAddress] ?: 0
+            lastConnectAttempt[target.deviceAddress] = now
+            connectAttemptCount[target.deviceAddress] = attempts + 1
+            Timber.i("connect() #${attempts + 1} → ${target.deviceName} status=${target.status}")
+            val config = WifiP2pConfig().apply {
+                deviceAddress = target.deviceAddress
+                wps.setup = WpsInfo.PBC
+                groupOwnerIntent = 15  // 电视必须赢得 GO 角色，才能接收投屏
+            }
+            try {
+                p2p.connect(ch, config, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() = Timber.i("connect() accepted for ${target.deviceName}")
+                    override fun onFailure(reason: Int) {
+                        Timber.w("connect() failed for ${target.deviceName}: $reason")
+                        // 失败立即清除冷却，允许下一次 PEERS_CHANGED 再试
+                        lastConnectAttempt.remove(target.deviceAddress)
+                    }
+                })
+            } catch (e: SecurityException) {
+                Timber.w("connect() denied: $e")
+                lastConnectAttempt.remove(target.deviceAddress)
             }
         }
     }

@@ -106,8 +106,9 @@ class MiracastController(
 
     init {
         p2p.onGroupDropped = { scheduleRebuild() }
-        p2p.onGroupFormed = { wfd.triggerScan() }
+        p2p.onGroupFormed = { info -> wfd.triggerScan(info) }
         p2p.onP2pEnabledChanged = { enabled -> onP2pEnabled(enabled) }
+        p2p.onDiscoveryHardFail = { scheduleChannelReinit() }
         wfd.onSessionFailed = { scheduleP2pReset() }
     }
 
@@ -125,6 +126,11 @@ class MiracastController(
                 converge(MiracastModeStore.get(ctx), force)
             }
         }
+    }
+
+    /** 用户退出播放页时调用：通知 Source 断开，短暂冷却后 WfdServer 重新待命。 */
+    fun disconnectSender() {
+        wfd.disconnectSender()
     }
 
     /** 服务被真正销毁时调用。撤销运行时资源并还给电视；用户意图不变。 */
@@ -345,9 +351,13 @@ class MiracastController(
                 val cur = state.value
                 if (cur is MiracastState.AppActive && !cur.groupReady) {
                     Timber.w("Miracast: group could not be rebuilt, giving the TV back")
-                    val ok = enterSystem()
-                    state.value = if (ok) MiracastState.Failed(MiracastError.GROUP_FAILED)
-                    else MiracastState.Failed(MiracastError.CANNOT_WRITE_SETTING)
+                    // enterSystem() 内部调 rebuildJob?.cancel() 会取消本 coroutine；
+                    // 用 NonCancellable 确保 state 赋值在取消后仍能执行
+                    withContext(NonCancellable) {
+                        val ok = enterSystem()
+                        state.value = if (ok) MiracastState.Failed(MiracastError.GROUP_FAILED)
+                        else MiracastState.Failed(MiracastError.CANNOT_WRITE_SETTING)
+                    }
                 }
             }
         }
@@ -364,6 +374,45 @@ class MiracastController(
             p2p.disconnectSender()
             // disconnectSender 是异步的；P2P 组断开后系统广播 CONNECTION_CHANGED(groupFormed=false)
             // → onGroupDropped → scheduleRebuild，不需要在这里额外处理。
+        }
+    }
+
+    /**
+     * discoverPeers() 持续失败超过阈值（driver 可能卡死）：关闭并重建整个 P2P channel。
+     * 与 scheduleRebuild 的区别：这里关的是底层 WifiP2pChannel，而不只是 P2P Group。
+     */
+    private fun scheduleChannelReinit() {
+        scope.launch {
+            mutex.withLock {
+                if (state.value !is MiracastState.AppActive) return@withLock
+                // Don't tear down the P2P channel while a Miracast session is live —
+                // doing so would kill the stream without sending TEARDOWN, leaving the
+                // Source stuck and causing "通道占用" on the next attempt.
+                if (wfd.hasActiveSession()) {
+                    Timber.i("Miracast: P2P hard-fail ignored — session active, will retry after disconnect")
+                    return@withLock
+                }
+                Timber.w("Miracast: P2P channel hard-fail, reinitializing channel")
+                val closeOk = runCatching { p2p.close() }
+                if (closeOk.isFailure) Timber.w(closeOk.exceptionOrNull(), "channel reinit: close failed")
+                delay(1_000L)
+                val openOk = runCatching { p2p.open() }
+                if (openOk.isFailure) {
+                    Timber.e(openOk.exceptionOrNull(), "Miracast: channel reinit open() failed, giving up")
+                    return@withLock
+                }
+                // 重新注册本地服务（open 后 channel 是全新的，旧注册已失效）
+                runCatching { p2p.registerLocalService() }.onFailure {
+                    Timber.w(it, "channel reinit: registerLocalService failed (non-fatal)")
+                }
+                // 重置重试计数器，让新一轮 discovery 从 0 开始计数
+                p2p.resetDiscoveryRetryCount()
+                runCatching { p2p.startDiscovery() }.onFailure {
+                    Timber.e(it, "Miracast: channel reinit startDiscovery() failed")
+                    return@withLock
+                }
+                Timber.i("Miracast: P2P channel reinitialized, discovery restarted")
+            }
         }
     }
 
@@ -410,6 +459,9 @@ class MiracastController(
                 mutex.withLock {
                     val cur = state.value as? MiracastState.AppActive ?: return@withLock
                     if (!p2p.autoConnectAndroid && cur.groupReady && !p2p.hasGroup()) {
+                        // Don't rebuild the group while a WFD session is streaming —
+                        // the group is in use and the discrepancy is transient.
+                        if (wfd.hasActiveSession()) return@withLock
                         Timber.w("Miracast: state says group ready but none exists, rebuilding")
                         state.value = cur.copy(groupReady = false)
                         scheduleRebuild()
@@ -450,9 +502,13 @@ class MiracastController(
                 if (overrideTimes.size >= 2) {
                     // 系统在主动覆盖（比如用户进了电视的投屏设置）：不对抗，尊重系统，降级并告知
                     Timber.w("Miracast: wifi_display_on overridden by system, falling back to SYSTEM")
-                    enterSystem()
-                    MiracastModeStore.set(ctx, MiracastMode.SYSTEM)
-                    state.value = MiracastState.Failed(MiracastError.SETTING_OVERRIDDEN)
+                    // enterSystem() 内部调 stopDriftWatch() → driftJob?.cancel() 会取消本 coroutine；
+                    // 用 NonCancellable 确保后续赋值在取消后仍能执行
+                    withContext(NonCancellable) {
+                        enterSystem()
+                        MiracastModeStore.set(ctx, MiracastMode.SYSTEM)
+                        state.value = MiracastState.Failed(MiracastError.SETTING_OVERRIDDEN)
+                    }
                 } else {
                     Timber.i("Miracast: wifi_display_on drifted, re-applying once")
                     withContext(Dispatchers.IO) { WifiDisplaySetting.write(ctx, true) }

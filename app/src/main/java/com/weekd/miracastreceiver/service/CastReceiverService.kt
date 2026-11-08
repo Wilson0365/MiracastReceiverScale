@@ -85,10 +85,7 @@ class CastReceiverService : Service() {
                 CastPlayerBridge.ACTION_STATE -> castPlayerBridge.onState(intent)
                 "com.weekd.miracastreceiver.DISCONNECT_SENDER" -> {
                     if (intent.getBooleanExtra("miracast", false)) {
-                        MiracastRuntime.controller?.let { c ->
-                            // WfdServer.disconnectSender() via MiracastController field access not needed;
-                            // removing the P2P group triggers a rebuild and disconnects the sender.
-                        }
+                        MiracastRuntime.controller?.disconnectSender()
                     } else {
                         airPlayReceiver.disconnectSender()
                     }
