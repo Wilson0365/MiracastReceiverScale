@@ -1024,3 +1024,295 @@ P1
 最终建议：以 A 方案作为 OPPO 的主架构，以 B 方案中的状态管理、扫描和故障恢复代码作为技术积累，而不是继续让 B 的 P2P 接管逻辑参与主流程。
 
 这样最符合你的最终目标：OPPO 负责把连接建立起来，你的 App 负责把画面真正拿过来，并且始终显示在自己的播放器中。
+
+明白了。这次你的意思是：只保留两个模式，APP mode 和 SYSTEM mode。区别不在于谁管理 P2P，而在于最终由谁负责播放。
+
+我之前把 APP mode 理解成 App 接管 P2P 了，这是理解错了。
+
+你真正想要的是下面这个架构。
+
+## 1. 两种模式的最终定义
+
+## SYSTEM MODE
+
+全部交给系统
+
+Android / OPPO 系统
+
+- P2P 建立与管理
+- RTSP 握手
+- RTP 视频接收
+- 视频解码
+- 系统播放器渲染
+
+App 不参与投屏链路，不启动 WfdServer、RtpReceiver 和自定义 Player。
+
+## APP MODE
+
+系统 P2P + App Player
+
+Android / OPPO 系统
+
+- P2P Group 建立
+- P2P 连接协商
+- P2P 网络维护
+
+P2P 由系统管理
+
+你的 App
+
+- 发现投屏 Source
+- 主动连接 RTSP 7236
+- 接收 RTP UDP
+- TS 解复用
+- MediaCodec 解码
+- PlayerActivity 自定义渲染
+
+媒体和播放器由 App 管理
+
+这里有个重要的技术边界：
+
+APP mode 虽然由系统管理 P2P，但 RTSP/RTP 必须由 App 自己接收，才能直接使用你现在的自定义播放器。
+
+除非系统另有明确的媒体数据交接 API，否则不能只让系统接收媒体，再假设普通 App 能拿到原始 RTP 数据。
+
+## 2. 代码应该怎样改？
+
+好消息是，你现有的代码已经具备大部分能力，不需要重写媒体接收部分。
+
+### APP MODE 的启动流程
+
+```
+MiracastController.enterApp()
+          │
+          ▼
+设置经过 OPPO 实测验证的 WFD 开关
+          │
+          ▼
+释放 App 原来的 P2P Group
+          │
+          ▼
+系统接管 P2P 管理
+          │
+          ▼
+WifiP2pObserver
+          │
+          ▼
+等待系统建立 Group
+          │
+          ▼
+获取 WifiP2pInfo
+          │
+          ▼
+WfdServer.start()
+          │
+          ▼
+扫描 Source:7236
+          │
+          ▼
+WfdSessionHandler
+          │
+          ▼
+RtpReceiver
+          │
+          ▼
+TsDemuxer
+          │
+          ▼
+MiracastVideoRenderer
+          │
+          ▼
+PlayerActivity
+```
+
+对应现有模块的调整：
+
+| 模块                    | APP MODE 的职责      |
+| --------------------- | ----------------- |
+| MiracastController    | 启动、停止、管理 APP mode |
+| WifiDirectManager     | 改为只读观察系统 P2P      |
+| WfdServer             | 保留，主动连接 Source    |
+| WfdSessionHandler     | 保留，处理 RTSP        |
+| RtpReceiver           | 保留，接收 UDP         |
+| TsDemuxer             | 保留                |
+| MiracastVideoRenderer | 保留                |
+| PlayerActivity        | 保留                |
+
+### SYSTEM MODE 的启动流程
+
+```
+MiracastController.enterSystem()
+          │
+          ▼
+停止 App WfdServer
+          │
+          ▼
+关闭 RTSP Session
+          │
+          ▼
+关闭 RTP Receiver
+          │
+          ▼
+清理 App 自己的 P2P 资源
+          │
+          ▼
+交还系统 WFD 管理权
+          │
+          ▼
+系统完整处理 Miracast
+```
+
+## 3. 最重要的代码改动：WifiDirectManager
+
+我建议不要直接删除原有 `WifiDirectManager`，而是增加两种工作职责。
+
+```
+enum class P2pControlMode {
+    APP_MANAGED,
+    SYSTEM_MANAGED
+}
+```
+
+原有 B 方案继续使用：
+
+```
+APP_MANAGED
+```
+
+这是原来的：
+
+```
+p2p.open()
+p2p.createGroup()
+p2p.connect()
+p2p.discoverPeers()
+p2p.setWfdInfo()
+```
+
+新的 APP mode 使用：
+
+```
+SYSTEM_MANAGED
+```
+
+只允许：
+
+```
+p2pObserver.startObserving()
+
+p2pObserver.onGroupFormed = { info ->
+    wfdServer.triggerScan(info)
+}
+```
+
+禁止：
+
+```
+p2p.createGroup()
+p2p.connect()
+p2p.removeGroup()
+p2p.setWfdInfo()
+p2p.discoverPeers()
+```
+
+特别注意：`close()` 也需要拆分。
+
+现有的 `close()` 会执行 `removeGroup()`，所以不能在 SYSTEM_MANAGED 状态下直接调用它。建议拆成：
+
+```
+fun stopObserver() {
+    unregisterReceiver()
+    closeChannelOnly()
+}
+
+suspend fun closeAppOwnedGroup() {
+    stopPeerDiscovery()
+    clearLocalServices()
+    removeGroup()
+}
+```
+
+只有 APP_MANAGED 模式才允许调用 `closeAppOwnedGroup()`。
+
+## 4. Controller 最终只保留两个入口
+
+```
+private suspend fun enterApp() {
+    state.value = MiracastState.Switching(MiracastMode.APP)
+
+    // 交接 P2P 给系统
+    systemP2pHandoff.releaseToSystem()
+
+    // 观察系统 P2P
+    p2pObserver.startObserving()
+
+    // 启动自己的 RTSP/RTP 接收
+    wfdServer.start()
+
+    state.value = MiracastState.AppActive(
+        groupReady = false,
+        wfdIeAdvertised = false
+    )
+}
+```
+
+```
+private suspend fun enterSystem() {
+    state.value = MiracastState.Switching(MiracastMode.SYSTEM)
+
+    // 只清理自己的媒体链路
+    wfdServer.stop()
+
+    // 停止只读观察
+    p2pObserver.stopObserving()
+
+    // 交还系统完整管理
+    systemP2pHandoff.releaseAllToSystem()
+
+    state.value = MiracastState.SystemOwned
+}
+```
+
+这里的 `releaseToSystem()` 和 `releaseAllToSystem()` 是新设计接口，需要依据你已经实测的 OPPO 行为实现。尤其要处理 `wifi_display_on` 的值，不能直接沿用旧 Controller 中 APP=1、SYSTEM=0 的假设。
+
+## 5. 有一个问题必须验证
+
+APP MODE 必须确保系统只接管 P2P 管理，而不是同时启动系统自己的完整 Miracast 媒体接收流程。
+
+因为你当前的：
+
+```
+WfdServer
+```
+
+会主动连接 Source 的 7236 端口，而且你的注释指出 Source 的监听队列只接受一次连接。
+
+假如 OPPO 系统服务已经连接了 Source 的 7236，App 再连接就可能造成冲突。
+
+所以 APP MODE 的验收条件是：
+
+1. 系统建立 P2P Group。
+2. 系统没有抢先消费 Source 的 RTSP 会话。
+3. App 成功建立到 Source:7236 的 TCP 连接。
+4. App 收到 UDP RTP。
+5. 自定义 PlayerActivity 正常显示。
+
+这五个条件必须全部满足。
+
+## 6. 最终设计总结
+
+| 功能        | SYSTEM MODE | APP MODE |
+| --------- | ----------- | -------- |
+| P2P 管理    | 系统          | 系统       |
+| P2P Group | 系统          | 系统       |
+| RTSP      | 系统          | App      |
+| RTP       | 系统          | App      |
+| 解码        | 系统          | App      |
+| Player    | 系统          | App      |
+| 调整画面比例    | 系统能力        | App 自己控制 |
+
+最终架构确定
+
+你的目标不是双 P2P 管理模式，而是双媒体播放模式。P2P 永远由系统管理，变化的只是媒体链路最终交给系统还是 App。
+
+这样既保留原生 SYSTEM MODE，又让 APP MODE 可以使用自己的播放器控制画面比例。
