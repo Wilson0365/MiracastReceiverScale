@@ -604,17 +604,11 @@ class PlayerActivity : AppCompatActivity() {
             if (scaleControlOverlay.visibility == View.VISIBLE &&
                 (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)) {
                 val direction = if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
-                // if (scaleOkHeld && ::scaleManager.isInitialized) {
-                //     scaleManager.panHorizontalFine(direction)
-                //     applyRotation()
-                //     scaleOkUsedForPan = true
-                //     return true
-                // }
                 if (event.repeatCount > 0 && ::scaleManager.isInitialized) {
                     scaleManager.panHorizontal(direction)
                     applyRotation()
+                    return true
                 }
-                return true  // 吞掉所有左右键（包括首次按下），防止焦点漂移到比例按钮
             }
         }
         // if (event.action == KeyEvent.ACTION_UP && !isDialogShowing &&
