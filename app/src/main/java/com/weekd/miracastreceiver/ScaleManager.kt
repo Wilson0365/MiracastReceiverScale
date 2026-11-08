@@ -17,7 +17,7 @@ class ScaleManager(val tvWidth: Int, val tvHeight: Int) {
     private val stepNormalY: Float get() = tvHeight * 0.05f
     private val stepAcceleratedY: Float get() = tvHeight * 0.02f
     private val stepNormalX: Float get() = tvWidth * 0.004f
-    private val stepAcceleratedX: Float get() = tvWidth * 0.002f
+    private val stepAcceleratedX: Float get() = tvWidth * 0.008f
 
     private val stepFineX: Float get() = tvWidth * 0.005f
 
