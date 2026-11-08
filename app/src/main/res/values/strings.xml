@@ -32,6 +32,8 @@
     <string name="status_permission_denied">Location permission not granted. Windows wireless casting is unavailable.</string>
     <string name="miracast_takeover">App controls Miracast (Win+K wireless display)</string>
     <string name="miracast_takeover_hint">On: this app appears in Windows Connect (Win+K). Off: the system\'s built-in Miracast receiver handles discovery instead.</string>
+    <string name="auto_connect_android">Auto-connect Android phones</string>
+    <string name="auto_connect_android_hint">When on, the TV proactively connects to nearby OPPO, vivo, and Xiaomi phones in Wi-Fi Direct. Only one phone at a time; stops after connecting.</string>
     <string name="status_miracast_app_active">Miracast managed by this app</string>
     <string name="status_miracast_system_active">System Miracast is active</string>
     <string name="miracast_clean_reapply">Clearing Miracast state and reapplying…</string>

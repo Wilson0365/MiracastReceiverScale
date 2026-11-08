@@ -107,6 +107,8 @@
     <string name="status_miracast_wifi_disabled">Windows / 安卓屏幕镜像需要 Wi-Fi Direct。请开启 Wi-Fi 后重新打开应用，仅连接网线不足以使用此功能。</string>
     <string name="miracast_takeover">App 接管 Miracast（Win+K 无线显示器）</string>
     <string name="miracast_takeover_hint">开启：本电视出现在 Windows 连接（Win+K）列表中。关闭：改由系统内置 Miracast 接收器负责发现。</string>
+    <string name="auto_connect_android">自动连接安卓手机</string>
+    <string name="auto_connect_android_hint">开启后，电视主动发现并连接附近的 OPPO、vivo、小米手机（Wi-Fi Direct）。每次只连一台，连上后停止。</string>
     <string name="status_miracast_app_active">Miracast 由本应用管理</string>
     <string name="status_miracast_system_active">系统 Miracast 已激活</string>
     <string name="miracast_clean_reapply">正在清理 Miracast 状态并重新应用…</string>

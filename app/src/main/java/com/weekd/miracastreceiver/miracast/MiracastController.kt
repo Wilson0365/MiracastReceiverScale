@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import com.weekd.miracastreceiver.service.CastReceiverService
+import com.weekd.miracastreceiver.util.AppSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,12 @@ object MiracastRuntime {
     /** 手动"清理并重新应用"：不改模式，只是把当前模式从头干净地做一遍。 */
     fun cleanAndReapply(ctx: Context) = requestMode(ctx, MiracastModeStore.get(ctx))
 
+    /** 更新"自动连接安卓"开关，立即生效（无需重启 APP 模式）。 */
+    fun setAutoConnectAndroid(ctx: Context, enabled: Boolean) {
+        AppSettings.setAutoConnectAndroid(ctx, enabled)
+        controller?.p2p?.autoConnectAndroid = enabled
+    }
+
     /** 上次因瞬时原因（没权限、Wi-Fi 没开）失败且意图仍是 APP 时，条件可能已满足，再试一次。 */
     fun retryIfNeeded(ctx: Context) {
         val s = state.value
@@ -73,7 +80,7 @@ object MiracastRuntime {
  */
 class MiracastController(
     context: Context,
-    private val p2p: WifiDirectManager,
+    internal val p2p: WifiDirectManager,
     private val wfd: WfdServer
 ) {
     companion object {
@@ -99,7 +106,9 @@ class MiracastController(
 
     init {
         p2p.onGroupDropped = { scheduleRebuild() }
+        p2p.onGroupFormed = { wfd.triggerScan() }
         p2p.onP2pEnabledChanged = { enabled -> onP2pEnabled(enabled) }
+        wfd.onSessionFailed = { scheduleP2pReset() }
     }
 
     // ------------------------------------------------------------------ 对外入口
@@ -234,16 +243,28 @@ class MiracastController(
                 if (!written) throw MiracastException(MiracastError.CANNOT_WRITE_SETTING)
 
                 p2p.open()
+                p2p.autoConnectAndroid = AppSettings.isAutoConnectAndroid(ctx)
                 p2p.registerLocalService()
-                p2p.createGroup()
-                // WFD IE 必须在建组之后：createGroup 是异步的，会覆盖先前注入的 IE
-                val ie = advertiseWfdIe()
-                p2p.startDiscovery()
+                // autoConnectAndroid 模式：跳过 createGroup()，直接 discoverPeers()，
+                // 由 handlePeersChanged 主动发起 connect(groupOwnerIntent=15)，走 P2P 协商
+                // 而非 Autonomous GO join 路径（后者会触发 UserAuthorizingJoinState，app 无权授权）。
+                val ie: Boolean
+                if (p2p.autoConnectAndroid) {
+                    ie = false
+                    p2p.startDiscovery()
+                } else {
+                    p2p.createGroup()
+                    // WFD IE 必须在建组之后：createGroup 是异步的，会覆盖先前注入的 IE
+                    ie = advertiseWfdIe()
+                    p2p.startDiscovery()
+                }
                 wfd.start()
 
                 startDriftWatch()
                 startHealthWatch()
-                state.value = MiracastState.AppActive(groupReady = true, wfdIeAdvertised = ie)
+                // autoConnectAndroid 模式无预建组，groupReady=false；连接后由 onGroupDropped/healthWatch 管理
+                val groupReady = !p2p.autoConnectAndroid
+                state.value = MiracastState.AppActive(groupReady = groupReady, wfdIeAdvertised = ie)
                 Timber.i("Miracast: APP mode active (wfdIe=$ie)")
             }
         } catch (e: TimeoutCancellationException) {
@@ -332,15 +353,34 @@ class MiracastController(
         }
     }
 
+    /**
+     * RTSP 握手失败（"传输通道被占用"等）：主动断开 P2P 组，让发送端重置 WFD 状态机，
+     * 等 [onGroupDropped] 触发后 [scheduleRebuild] 会自动重建。
+     * 不影响 APP 模式状态——只是把 P2P 组拆掉，让双方重新走 P2P 协商流程。
+     */
+    private fun scheduleP2pReset() {
+        scope.launch {
+            Timber.w("Miracast: RTSP handshake failed, resetting P2P group to unblock sender")
+            p2p.disconnectSender()
+            // disconnectSender 是异步的；P2P 组断开后系统广播 CONNECTION_CHANGED(groupFormed=false)
+            // → onGroupDropped → scheduleRebuild，不需要在这里额外处理。
+        }
+    }
+
     /** 必须在锁内调用。非 APP 状态直接视为"没事可做"（丢弃过期回调）。 */
     private suspend fun tryRebuild(): Boolean {
         val cur = state.value as? MiracastState.AppActive ?: return true
         return try {
-            val created = p2p.createGroup()
             var ie = cur.wfdIeAdvertised
-            if (created) {
-                ie = advertiseWfdIe()
+            if (p2p.autoConnectAndroid) {
+                // autoConnectAndroid 模式无 Autonomous GO，重建只需重启 discovery
                 p2p.startDiscovery()
+            } else {
+                val created = p2p.createGroup()
+                if (created) {
+                    ie = advertiseWfdIe()
+                    p2p.startDiscovery()
+                }
             }
             state.value = MiracastState.AppActive(groupReady = true, wfdIeAdvertised = ie)
             true
@@ -369,7 +409,7 @@ class MiracastController(
                 delay(HEALTH_INTERVAL_MS)
                 mutex.withLock {
                     val cur = state.value as? MiracastState.AppActive ?: return@withLock
-                    if (cur.groupReady && !p2p.hasGroup()) {
+                    if (!p2p.autoConnectAndroid && cur.groupReady && !p2p.hasGroup()) {
                         Timber.w("Miracast: state says group ready but none exists, rebuilding")
                         state.value = cur.copy(groupReady = false)
                         scheduleRebuild()

@@ -45,11 +45,20 @@ class WfdServer(
     var onStreamStarted: ((rtpPort: Int) -> Unit)? = null
     var onStreamStopped: (() -> Unit)? = null
 
+    /**
+     * RTSP 握手阶段失败（连上了 7236 但没走到 PLAY）。
+     * 典型原因：OPPO 还没释放上次的通道（"传输通道被占用"），或握手超时。
+     * Controller 接到后应拆 P2P 组，让 OPPO 重置 WFD 状态机，再重建。
+     */
+    var onSessionFailed: (() -> Unit)? = null
+
     companion object {
         private const val SCAN_INTERVAL_MS = 3_000L
         private const val CONNECT_TIMEOUT_MS = 400
         private const val SCAN_CHUNK = 32          // 每批并发探测的地址数
     }
+
+    @Volatile private var triggerImmediate = false
 
     fun start() {
         if (isRunning) {
@@ -62,10 +71,11 @@ class WfdServer(
         scope.launch {
             while (isRunning) {
                 try {
-                    if (android.os.SystemClock.elapsedRealtime() < reconnectAfterMs) {
+                    if (!triggerImmediate && android.os.SystemClock.elapsedRealtime() < reconnectAfterMs) {
                         delay(SCAN_INTERVAL_MS)
                         continue
                     }
+                    triggerImmediate = false
                     val socket = dialSource()
                     if (socket != null) {
                         runSession(socket)
@@ -143,9 +153,13 @@ class WfdServer(
         }
         rtpReceiver = receiver
 
+        var streamStarted = false
         val handler = WfdSessionHandler(context, socket, rtpPort).apply {
             onSessionEstablished = { onConnectionEstablished?.invoke(it) }
-            onStreamStart = { onStreamStarted?.invoke(it) }
+            onStreamStart = {
+                streamStarted = true
+                onStreamStarted?.invoke(it)
+            }
             onStreamStop = { onStreamStopped?.invoke() }
         }
         sessionHandler = handler
@@ -156,7 +170,19 @@ class WfdServer(
             receiver.stop()
             rtpReceiver = null
             sessionHandler = null
+            // 如果连上了 7236 但没走到 PLAY，说明 OPPO 的 WFD 通道没释放或握手失败。
+            // 通知 Controller 拆 P2P 组，强制 OPPO 重置状态机。
+            if (!streamStarted) {
+                Timber.w("WFD: session ended without PLAY (channel busy or handshake failed), requesting P2P reset")
+                onSessionFailed?.invoke()
+            }
         }
+    }
+
+    /** P2P 组已形成，立刻触发一次扫描，不等 3 秒周期。 */
+    fun triggerScan() {
+        triggerImmediate = true
+        Timber.i("WFD: P2P group formed, triggering immediate scan")
     }
 
     fun stop() {

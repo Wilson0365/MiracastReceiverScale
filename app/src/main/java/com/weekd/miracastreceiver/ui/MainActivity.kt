@@ -50,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchAutoStart: SwitchCompat
     private lateinit var switchReturnToApp: SwitchCompat
     private lateinit var switchMiracastTakeover: SwitchCompat
+    private lateinit var switchAutoConnectAndroid: SwitchCompat
     private lateinit var tvLanguageValue: TextView
 
     /** 定位权限弹窗还在时不叠加悬浮窗权限提示，等它有结果再说 */
@@ -191,6 +192,7 @@ class MainActivity : AppCompatActivity() {
         }
         switchReturnToApp = findViewById(R.id.switch_return_to_app)
         switchMiracastTakeover = findViewById(R.id.switch_miracast_takeover)
+        switchAutoConnectAndroid = findViewById(R.id.switch_auto_connect_android)
         tvLanguageValue = findViewById(R.id.tv_language_value)
 
         // 开机自启开关
@@ -220,6 +222,13 @@ class MainActivity : AppCompatActivity() {
             MiracastRuntime.cleanAndReapply(this)
             Toast.makeText(this, R.string.miracast_clean_reapply, Toast.LENGTH_SHORT).show()
             true
+        }
+
+        // 自动连接安卓手机开关
+        switchAutoConnectAndroid.isChecked = AppSettings.isAutoConnectAndroid(this)
+        switchAutoConnectAndroid.setOnCheckedChangeListener { _, isChecked ->
+            Timber.i("Auto-connect Android set to $isChecked")
+            MiracastRuntime.setAutoConnectAndroid(this, isChecked)
         }
 
         // 界面语言
