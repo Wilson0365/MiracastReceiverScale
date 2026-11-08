@@ -16,10 +16,7 @@ class ScaleManager(val tvWidth: Int, val tvHeight: Int) {
 
     private val stepNormalY: Float get() = tvHeight * 0.05f
     private val stepAcceleratedY: Float get() = tvHeight * 0.02f
-    private val stepNormalX: Float get() = tvWidth * 0.004f
-    private val stepAcceleratedX: Float get() = tvWidth * 0.008f
-
-    private val stepFineX: Float get() = tvWidth * 0.005f
+    private val stepX: Float get() = tvWidth * 0.004f
 
     fun switchMode(newMode: ScaleMode) {
         mode = newMode
@@ -33,14 +30,13 @@ class ScaleManager(val tvWidth: Int, val tvHeight: Int) {
         offsetY += direction * step
     }
 
-    fun panHorizontal(direction: Int, isAccelerated: Boolean) {
+    fun panHorizontal(direction: Int) {
         if (mode == ScaleMode.ORIGINAL) return
-        val step = if (isAccelerated) stepAcceleratedX else stepNormalX
-        offsetX += direction * step
+        offsetX += direction * stepX
     }
 
-    fun panHorizontalFine(direction: Int) {
-        if (mode == ScaleMode.ORIGINAL) return
-        offsetX += direction * stepFineX
-    }
+    // fun panHorizontalFine(direction: Int) {
+    //     if (mode == ScaleMode.ORIGINAL) return
+    //     offsetX += direction * stepFineX
+    // }
 }

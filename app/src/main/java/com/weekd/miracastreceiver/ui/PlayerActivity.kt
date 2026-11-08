@@ -611,8 +611,7 @@ class PlayerActivity : AppCompatActivity() {
                 //     return true
                 // }
                 if (event.repeatCount > 0 && ::scaleManager.isInitialized) {
-                    val isAccelerated = event.repeatCount > 10
-                    scaleManager.panHorizontal(direction, isAccelerated)
+                    scaleManager.panHorizontal(direction)
                     applyRotation()
                 }
                 return true  // 吞掉所有左右键（包括首次按下），防止焦点漂移到比例按钮
