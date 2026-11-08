@@ -196,8 +196,8 @@ class PlayerActivity : AppCompatActivity() {
     private var seekAccelerationStep = 0
     private var lastSeekWasForward = true
     private var lastSeekPressAt = 0L
-    private var scaleOkHeld = false
-    private var scaleOkUsedForPan = false
+    // private var scaleOkHeld = false
+    // private var scaleOkUsedForPan = false
     private var seekCommitJob: Job? = null
     private var isControllerVisible = false
     private var isDialogShowing = false
@@ -596,20 +596,20 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 return true
             }
-            if (scaleControlOverlay.visibility == View.VISIBLE &&
-                (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER)) {
-                scaleOkHeld = true
-                // 不 return true，等 ACTION_UP 决定是否放行 click
-            }
+            // if (scaleControlOverlay.visibility == View.VISIBLE &&
+            //     (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER)) {
+            //     scaleOkHeld = true
+            //     // 不 return true，等 ACTION_UP 决定是否放行 click
+            // }
             if (scaleControlOverlay.visibility == View.VISIBLE &&
                 (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)) {
                 val direction = if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
-                if (scaleOkHeld && ::scaleManager.isInitialized) {
-                    scaleManager.panHorizontalFine(direction)
-                    applyRotation()
-                    scaleOkUsedForPan = true
-                    return true
-                }
+                // if (scaleOkHeld && ::scaleManager.isInitialized) {
+                //     scaleManager.panHorizontalFine(direction)
+                //     applyRotation()
+                //     scaleOkUsedForPan = true
+                //     return true
+                // }
                 if (event.repeatCount > 0 && ::scaleManager.isInitialized) {
                     val isAccelerated = event.repeatCount > 10
                     scaleManager.panHorizontal(direction, isAccelerated)
@@ -618,16 +618,16 @@ class PlayerActivity : AppCompatActivity() {
                 }
             }
         }
-        if (event.action == KeyEvent.ACTION_UP && !isDialogShowing &&
-            scaleControlOverlay.visibility == View.VISIBLE &&
-            (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER)) {
-            scaleOkHeld = false
-            if (scaleOkUsedForPan) {
-                scaleOkUsedForPan = false
-                return true  // 吞掉 click，不触发比例按钮选中
-            }
-            scaleOkUsedForPan = false
-        }
+        // if (event.action == KeyEvent.ACTION_UP && !isDialogShowing &&
+        //     scaleControlOverlay.visibility == View.VISIBLE &&
+        //     (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER)) {
+        //     scaleOkHeld = false
+        //     if (scaleOkUsedForPan) {
+        //         scaleOkUsedForPan = false
+        //         return true  // 吞掉 click，不触发比例按钮选中
+        //     }
+        //     scaleOkUsedForPan = false
+        // }
         if (event.action == KeyEvent.ACTION_DOWN && !isCurrentImage() && !isDialogShowing) {
             val isForwardKey = event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
                 event.keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD
