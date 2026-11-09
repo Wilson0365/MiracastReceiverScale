@@ -471,6 +471,123 @@ PlayerActivity.kt
 
 这三个行为分开后，就不会出现手机断开投屏，电视却意外关闭整个接收服务的问题。
 
+我查到了一个明确的问题点：你按返回键时，代码确实通知了 AirPlay 接收器断开，但没有直接停止 AirPlay 的音频输出。
+
+现在的执行链路是：
+
+1. `PlayerActivity.onBackPressed()` 发送 `DISCONNECT_SENDER`，并传入 `miracast=false`，表示断开的是 AirPlay。
+
+   PlayerActivity.kt
+
+2. `CastReceiverService` 收到广播后调用 `airPlayReceiver.disconnectSender()`。
+
+   CastReceiverService.kt
+
+3. 播放页的 `stopPlayback()` 只停止 ExoPlayer、更新播放状态；但 AirPlay 镜像的音视频并不是通过 ExoPlayer 播放的。
+
+   PlayerActivity.kt
+
+4. `PlayerActivity.onDestroy()` 会清理 Surface 和 Activity 自己的资源，但 AirPlay 接收器仍由后台 Service 持有，正常情况下不会因为播放页退出而销毁。
+
+   CastReceiverService.kt
+
+
+
+所以，画面消失而声音继续，完全符合目前这条代码路径可能出现的现象。不能只清理 Surface，也不能只调用 `player.stop()`；必须确保 AirPlay 当前会话的音频解码器、音频输出设备和接收线程一起停止。
+
+## 应该怎么修
+
+我建议把 AirPlay 的停止逻辑明确拆成两个层级：
+
+| 操作           | 要停止什么                                    | 要保留什么                          |
+| ------------ | ---------------------------------------- | ------------------------------ |
+| 电视播放页按返回键    | 当前 RTSP 会话、音频接收 Socket、AudioPlayer、视频解码器 | AirPlay 接收服务、mDNS 广播、RTSP 监听端口 |
+| iPad 主动断开    | 同样释放当前会话的音视频资源                           | AirPlay 接收服务继续待命               |
+| 用户主动停止整个接收服务 | 所有 AirPlay 资源和服务                         | 不保留监听                          |
+
+不能为了关掉声音就直接调用 `airPlayReceiver.stop()`。 那会把 AirPlay 接收服务本身也停掉，iPad 下一次就可能找不到电视。
+
+### 真正要补上的停止链路
+
+我查到的 PhairPlay 上游实现中，`AirPlayReceiver` 有独立的 `AudioPlayer`、音频 UDP Socket 和视频解码器。`releaseMediaComponents()` 会关闭音频 Socket、释放视频解码器和音频播放器；正常会话结束时由 `onStreamingStopped()` 触发这套清理。
+
+[image](https://www.google.com/s2/favicons?domain=https://raw.githubusercontent.com\&sz=32)
+
+raw\.githubusercontent.com+1
+
+
+
+所以，你现在的 `airPlayReceiver.disconnectSender()` 必须确保能走到这套会话清理逻辑。
+
+我建议在 `RtspHandler` 中提供一个只断开当前客户端、不关闭服务器监听的方法：
+
+```
+fun disconnectCurrentClient() {
+    runCatching {
+        activeClient?.close()
+    }.onFailure {
+        Logger.w("Failed to close active AirPlay client", it)
+    }
+}
+```
+
+上游 `RtspHandler` 在客户端 Socket 关闭后的 `finally` 中会调用 `onStreamingStopped()`。这样就可以复用统一的资源释放路径，而不是另外做一套只清画面的逻辑。
+
+[image](https://www.google.com/s2/favicons?domain=https://github.com\&sz=32)
+
+GitHub+1
+
+
+
+然后让 `AirPlayReceiver.disconnectSender()` 调用这个方法：
+
+```
+fun disconnectSender() {
+    rtspHandler?.disconnectCurrentClient()
+}
+```
+
+这里是修复方向示例，具体要结合你当前分支的类成员和线程模型调整，不能直接保证复制后就能编译。
+
+另外，`AudioPlayer.release()` 也必须真正停止并释放底层音频输出（例如 `AudioTrack`），不能只是暂停或把画面解绑。这个文件我目前还没看到，暂时不能确认它是否也存在清理缺口。
+
+### Service 这一层也建议补一个状态复位
+
+你当前 Service 收到 AirPlay 断开广播时，只调用了 `airPlayReceiver.disconnectSender()`。建议同时复位 `airPlayPlayerStarted`，避免本地退出后 Service 还误以为播放页处于启动状态：
+
+```
+else {
+    airPlayPlayerStarted = false
+    airPlayReceiver.disconnectSender()
+}
+```
+
+这只是修正状态，真正停声音仍然依赖上面的音频资源释放链路。
+
+CastReceiverService.kt
+
+
+
+## 我认为这次必须验证的结果
+
+修复以后，按电视遥控器返回键，日志应该能看到类似这样的完整过程：
+
+```
+AirPlay: local disconnect requested
+AirPlay: active RTSP client closed
+AirPlay: streaming stopped
+AirPlay: audio socket closed
+AirPlay: AudioPlayer released
+AirPlay: VideoDecoder released
+AirPlay: state changed to ADVERTISING
+```
+
+最后一行很重要：声音停了，但 AirPlay 监听仍然在，下一次 iPad 还能正常投屏。
+
+现在还缺少三个决定最终补丁的源码文件： `AirPlayReceiver.kt`、`RtspHandler.kt`、`AudioPlayer.kt`。
+
+你目前上传的 `CastReceiverService.kt` 和 `PlayerActivity.kt` 足够确认调用链，但没有包含这三个类的实现。我不想只改 Activity 就告诉你问题解决了——那样很可能只是把画面关掉，声音问题依旧。请把这三个文件发上来，我们就直接针对音频会话的释放位置修，不动你现有的 AirPlay 服务常驻机制。
+
 ## 找到根因了：是 URL 视频被特意保留下来
 
 这次问题已经可以从源码中定位，不是 `AudioPlayer.release()` 没有执行这么简单。
