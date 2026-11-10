@@ -52,6 +52,8 @@ Secondary locales fall back to English for receiver status/mode copy; English an
 
 ## Provenance and review
 
+[Android phone mirroring review (SP2P, Chinese)](docs/android-mirroring-review-sp2p.md) covers the current connection, RTSP/RTP, media, recovery and device acceptance flow. The earlier docs/android-mirroring-report.md describes the historical active-P2P architecture.
+
 Base: 3208713c738fc62acc3bf12e140825575ee885ce. Reference takeoveroff: 0e9fd15c4b19fe275a3a511a78adce4ba60f8064. Neither source branch is changed. Earlier three-mode proposals in GPTPlan are historical; its final APP/SYSTEM media ownership definition is the implemented specification.
 
 [Design](docs/superpowers/specs/2026-11-10-system-p2p-app-media-design.md) / [Implementation plan](docs/superpowers/plans/2026-11-10-system-p2p-app-media.md) / [Execution evidence](docs/superpowers/plans/2026-11-10-system-p2p-app-media-progress.md).
