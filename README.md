@@ -1,4 +1,6 @@
-# Miracast Receiver Scale: System P2P / App Media
+# Miracast Scale SP2P: System P2P / App Media
+
+This side-by-side app is built on feature/system-p2p-app-media-side-by-side, copied from the original feature branch at c18d7b5. Its independent package ID lets it coexist with the original Miracast Receiver on the same TV. The earlier feature branch is preserved.
 
 Feature project based on [release/v1.2.13](https://github.com/Wilson0365/MiracastReceiverScale/tree/release/v1.2.13), implementing the final two-mode design from [takeoveroff GPTPlan](GPTPlan) and [GPTReview](GPTReview.md).
 
@@ -12,7 +14,7 @@ The app never creates, connects, discovers, removes or rebuilds P2P groups, and 
 APP mode requests wifi_display_on=1, matching the takeoveroff experiment. This is a firmware setting, **not** proof of P2P or media ownership. If already 1, no write permission is needed. Otherwise grant the existing app permission:
 
 ~~~sh
-adb shell pm grant com.weekd.miracastreceiver android.permission.WRITE_SECURE_SETTINGS
+adb shell pm grant com.weekd.miracastreceiver.systemp2p android.permission.WRITE_SECURE_SETTINGS
 ~~~
 
 The prior setting is persisted before writing, and restored on release only if the current value still matches this session's write. External changes permanently relinquish the setting lease, including off/on cycles. After process death, the app cannot prove the old write stayed owned, so it discards that restoration claim and leaves the current platform setting unchanged. No unowned or legacy P2P group is deleted. If upgrading from a version that actively created groups, stop that old app first; this feature deliberately does not guess which system group is safe to remove.
@@ -27,7 +29,7 @@ Requirements: Android SDK 36, JDK 17, CMake 3.22.1 and installed Android NDK. Co
 .\gradlew.bat testDebugUnitTest assembleDebug
 ~~~
 
-The application ID stays com.weekd.miracastreceiver (normal upgrade compatibility); versionName identifies this feature as 1.2.13-system-p2p. Do not run two packages competing for the same media ports.
+The application ID is com.weekd.miracastreceiver.systemp2p and the TV launcher name is Miracast Scale SP2P. It installs separately from com.weekd.miracastreceiver, with separate settings and permissions. VersionName is 1.2.13-system-p2p and versionCode is 20. Both apps can be installed; run only one receiving service at a time because they use the same media ports. Disable auto-start on boot in one app when testing them side by side.
 
 ## Device acceptance
 
