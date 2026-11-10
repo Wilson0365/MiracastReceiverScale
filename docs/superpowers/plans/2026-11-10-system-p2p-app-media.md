@@ -37,4 +37,4 @@
 **Files:** README.md, app/build.gradle.kts, source GPTPlan/GPTReview.md, acceptance documentation.
 - [x] Record architecture, setting adapter limits, provenance and hardware validation commands; identify feature build in versionName.
 - [x] Run testDebugUnitTest assembleDebug lintDebug, review complete diff with independent reviewer, fix important findings and reverify.
-- [ ] Push only the new feature branch, verify remote source SHAs and report APK locations and remaining hardware checks.
+- [x] Push only the new feature branch, verify remote source SHAs and report APK locations and remaining hardware checks.
