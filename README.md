@@ -1,5 +1,7 @@
 # Miracast Receiver — Android TV 投屏接收端
 
+流程与架构评估：[Android 手机镜像到电视 Report](docs/android-mirroring-report.md)。
+
 ## 1.2.13 接收器退出行为
 
 - Android 手机自动连接作为内部策略开启，主界面隐藏对应开关与说明。
