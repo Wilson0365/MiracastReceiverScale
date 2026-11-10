@@ -29,7 +29,7 @@
 
     <!-- 写入系统 Miracast 开关（wifi_display_on）；不弹权限窗口，靠一次性 adb 授予：
          adb shell pm grant com.weekd.miracastreceiver android.permission.WRITE_SECURE_SETTINGS -->
-    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" tools:ignore="ProtectedPermissions" />
 
     <!-- 后台拉起播放页：Android 10+ 禁止后台启动 Activity，只有前台服务不够，
          持有「显示在其他应用上层」权限的应用可豁免，否则应用不在前台时投屏没有画面 -->

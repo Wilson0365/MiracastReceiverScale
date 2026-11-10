@@ -1,182 +1,55 @@
-# Miracast Receiver — Android TV 投屏接收端
+# Miracast Receiver Scale: System P2P / App Media
 
-流程与架构评估：[Android 手机镜像到电视 Report](docs/android-mirroring-report.md)。
+Feature project based on [release/v1.2.13](https://github.com/Wilson0365/MiracastReceiverScale/tree/release/v1.2.13), implementing the final two-mode design from [takeoveroff GPTPlan](GPTPlan) and [GPTReview](GPTReview.md).
 
-## 1.2.13 接收器退出行为
+- **APP mode (switch on):** Android manages P2P discovery, negotiation and groups. This app observes that network, actively connects to Source TCP 7236, binds UDP 19000 before RTSP, receives and decodes the stream, and renders in its own PlayerActivity. The existing scale, crop and rotation controls remain available.
+- **SYSTEM mode (switch off):** this app stops its Miracast media and observer. Native system Miracast handles playback. Other receivers (AirPlay, DLNA, experimental Google Cast) retain the v1.2.13 implementation.
 
-- Android 手机自动连接作为内部策略开启，主界面隐藏对应开关与说明。
-- 电视在播放页或主界面按返回键：结束当前播放，保存 Miracast SYSTEM 模式，清理 Miracast、AirPlay、DLNA 和 Google Cast，停止前台服务。播放中的设置浮层仍先关闭浮层。
-- DLNA 客户端停止投屏：只结束当前播放，接收服务继续待命。Miracast 或 AirPlay 屏幕镜像的发送端停止：关闭全部接收服务，Miracast 回到 SYSTEM。
-- AirPlay 镜像切换到独立 URL 视频时继续播放，不把控制连接结束误判为整次投屏结束；独立 URL 视频和 Google Cast 客户端停止仍继续待命。
-- AirPlay 本地停止会释放独立 URL 视频，控制连接提前断开也不会留下播放状态。
-- 清理失败保留残留标记，下次启动继续尝试；不会仅凭系统设置写回成功就宣称全部资源已清理。
+The app never creates, connects, discovers, removes or rebuilds P2P groups, and never injects WFD IE. Disconnect/recovery closes only its media sockets and waits for the system network. Long-pressing the mode switch restarts app media without purging system P2P. Explicit exit still stops all receivers; a remote Miracast disconnect leaves reception available for the next session.
 
-验证：JVM 回归测试与 release 构建；投屏、电视固件 P2P/WFD 清理和返回后再次连接仍需真机验证。
+## Firmware behavior
 
-运行在 Android TV（小米等）上的 Miracast/WFD Sink 应用。核心目标：让自定义播放器成为投屏目标，从而能调整画面比例、做水平平移等系统投屏做不到的事。
+APP mode requests wifi_display_on=1, matching the takeoveroff experiment. This is a firmware setting, **not** proof of P2P or media ownership. If already 1, no write permission is needed. Otherwise grant the existing app permission:
 
----
-
-## 功能特性
-
-- **APP 模式**：完全接管 Wi-Fi Display，通过 Wi-Fi Direct P2P 自动接收手机投屏，走自定义播放器
-- **SYSTEM 模式**：退出占用，将投屏控制权还给电视系统原生服务
-- **autoConnectAndroid**：无需用户操作，TV 自动发现并连接 OPPO/Vivo/Xiaomi/Samsung 手机
-- **P2P 自愈**：RTSP 握手失败（"传输通道被占用"）自动重置 P2P 组，无需手动重启手机
-- **DriftWatch**：监测系统覆盖 `wifi_display_on` 开关，一次漂移自动修复，连续两次让步给系统
-- **遥控器画面调整**：按 MENU 键打开比例控制浮层，支持多种宽高比、垂直/水平平移、精细对齐
-
----
-
-## 遥控器操作
-
-MENU 键打开比例控制浮层后：
-
-| 按键 | 功能 |
-|------|------|
-| 左 / 右 | 切换比例模式 |
-| 上 / 下 | 垂直平移 |
-| 长按左 / 长按右 | 水平平移 |
-| OK（单击） | 确认当前比例 |
-| Back | 关闭浮层 |
-
----
-
-## APP 模式工作原理
-
-### autoConnectAndroid 连接流程
-
-```
-TV 开 APP 模式
-  └─ discoverPeers()
-       └─ PEERS_CHANGED 广播收到 OPPO/Vivo/Xiaomi/Samsung 设备
-            └─ connect(groupOwnerIntent=15)  ← TV 抢 GO 角色（OPPO 的 intent=14）
-                 └─ P2P-GROUP-FORMATION-SUCCESS  TV 成为 Group Owner
-                      └─ WfdServer 扫描 P2P 子网，连接 Source 的 TCP 7236
-                           └─ RTSP M1–M7 握手
-                                └─ PLAY → 开始推流到自定义播放器
-```
-
-### "传输通道被占用"自动恢复
-
-OPPO 等手机在 RTSP 会话没有收到 `TEARDOWN` 就断开时，WFD 状态机会卡在"session active"，拒绝新的连接。之前的表现是必须重启手机。
-
-现在的处理路径：
-
-```
-TCP 连上 7236，但没走到 PLAY（streamStarted=false）
-  └─ WfdServer.onSessionFailed 触发
-       └─ MiracastController.scheduleP2pReset()
-            └─ WifiDirectManager.disconnectSender() → removeGroup()
-                 └─ OPPO 收到 P2P disconnect 事件，WFD 状态机重置
-                      └─ onGroupDropped → scheduleRebuild() → 重新 discoverPeers
-                           └─ 15~30s 后自动恢复连接
-```
-
-### APP 模式与系统投屏的共存
-
-**现象**：APP 模式下打开系统投屏 app，投屏走系统；再回到自定义 app，走自定义播放器。
-
-**原因**：
-
-`wifi_display_on = 1` 不是锁，只是"WFD 子系统已启用"的全局标志。系统投屏服务看到它是 1，同样认为功能已开启，正常工作。
-
-实际控制权取决于**谁先占住 P2P Group Owner 角色**，这是 `wpa_supplicant` 层的竞争：
-
-- **自定义 app 运行时**：app 持续跑 `discoverPeers`，手机广播出现时抢先调 `connect(groupOwnerIntent=15)`，TV 赢得 GO → 投屏走自定义播放器
-- **系统投屏 app 打开时**：系统服务主动发起 `discoverPeers + connect()`，它比被动等待的自定义 app 更快，抢先完成 P2P 协商 → 投屏走系统播放器
-
-两套服务都调 `WifiP2pManager`，操作同一个 `wpa_supplicant`。没有互斥锁，完全靠时序竞争。这使得两者自然共存：自定义 app 用于日常投屏，TV 内置投屏 app 打开时自动接管，关掉后下次投屏自动回到自定义播放器。
-
-### 另一条路：系统处理 P2P，app 只接流（待验证）
-
-> 这是一个待测试的替代架构方向，记录在此。
-
-当 app 调 `removeGroup()` 让出 P2P 控制权后，实测发现系统 Miracast 服务接管了连接——而投屏画面依然进入了自定义播放器。分析如下：
-
-```
-takeover OFF：
-  app 写 wifi_display_on=1 + 调 removeGroup()
-    → P2P 组消失，系统 Miracast 服务拿回控制权
-    → OPPO 再投屏时，系统服务处理 P2P 握手
-      （系统签名有权限授权 UserAuthorizingJoinState）
-    → 连接成功后，RTSP 流打到 WfdServer（7236 端口仍在监听）
-    → 自定义 PlayerActivity 播放 → 可以调画面比例 ✓
-```
-
-**关键洞察**：app 做了一件正确的事——让路。系统负责 P2P 握手这道难题（需要系统签名权限），app 只负责接收 RTSP 流并渲染。两者各司其职。
-
-**真正的目标**：不在于谁处理 P2P 连接，而在于**画面进自己的 player**——这样才能调节比例。如果系统 Miracast 处理握手、流量进自定义 PlayerActivity，同样满足需求，且更简单稳定（绕开了 P2P GO 竞争、WFD IE 权限等问题）。
-
-这条路计划在独立分支 `experiment/system-p2p-custom-player` 验证。
-
----
-
-## 安装
-
-### 环境要求
-
-- Android Studio 2024.1+ 或命令行 Gradle
-- Android SDK API 21+
-- JDK 17+
-
-### 构建
-
-```bash
-# Debug APK（推荐用于开发调试）
-./gradlew app:assembleDebug
-
-# Release APK
-./gradlew app:assembleRelease
-```
-
-APK 输出：
-```
-app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
-app/build/outputs/apk/release/app-armeabi-v7a-release.apk
-```
-
-### 安装到电视
-
-```bash
-# 先连上电视（Wi-Fi ADB）
-adb connect 192.168.1.2:5555
-
-# 安装
-adb install app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
-```
-
-### 权限
-
-应用只需要 `WRITE_SECURE_SETTINGS`（通过 adb 授权，无需 root）：
-
-```bash
+~~~sh
 adb shell pm grant com.weekd.miracastreceiver android.permission.WRITE_SECURE_SETTINGS
-```
+~~~
 
----
+The prior setting is persisted before writing, and restored on release only if the current value still matches this session's write. External changes permanently relinquish the setting lease, including off/on cycles. After process death, the app cannot prove the old write stayed owned, so it discards that restoration claim and leaves the current platform setting unchanged. No unowned or legacy P2P group is deleted. If upgrading from a version that actively created groups, stop that old app first; this feature deliberately does not guess which system group is safe to remove.
 
-## 技术栈
+OPPO/system firmware must establish P2P **without consuming the Source RTSP session before this app connects**. That hardware condition remains to be verified. Windows discovery also depends on the system advertising a compatible WFD Sink IE; a successful APK build cannot prove it.
 
-| 组件 | 说明 |
-|------|------|
-| Wi-Fi Direct | `WifiP2pManager`，TV 作为 GO，groupOwnerIntent=15 |
-| WFD 协议 | 主动连接 Source 的 TCP 7236，跑 RTSP M1–M7 |
-| RTP 接收 | UDP 19000，接收 MPEG-2 TS |
-| 状态管理 | `MiracastController` + `MiracastRuntime` StateFlow |
-| 后台服务 | `CastReceiverService` 前台服务 |
-| 日志 | Timber |
+## Build
 
----
+Requirements: Android SDK 36, JDK 17, CMake 3.22.1 and installed Android NDK. Configure local.properties for your SDK and Gradle's JDK as needed.
 
-## 已知限制
+~~~powershell
+.\gradlew.bat testDebugUnitTest assembleDebug
+~~~
 
-- **Windows/Mac 投屏**：依赖 WFD IE 广播（需要 `setWFDInfo` 的 signature 级权限），无 root/系统签名时 Windows 端看不到本机。手机端（OPPO/Samsung 等）不依赖 WFD IE，正常使用。
-- **非目标品牌手机**：`autoConnectAndroid` 只自动连接 OPPO/Vivo/Xiaomi/Samsung，其他品牌需手动连接。
-- **P2P 恢复延迟**：握手失败后的自动恢复约需 15~30s（P2P 重建 + OPPO 重新响应扫描）。
+The application ID stays com.weekd.miracastreceiver (normal upgrade compatibility); versionName identifies this feature as 1.2.13-system-p2p. Do not run two packages competing for the same media ports.
 
----
+## Device acceptance
 
-## 许可证
+1. Select SYSTEM: app RTSP/RTP are stopped; verify native system mirroring.
+2. Select APP and connect from OPPO. Confirm logs in order: system P2P group/GO, interface IP, app Source:7236 connection, matching PLAY, first RTP, decoder output to custom PlayerActivity.
+3. Verify the app PID owns Source TCP 7236 and local UDP 19000, and scale controls change the app-rendered picture.
+4. Stop from the phone, reconnect repeatedly, toggle APP/SYSTEM and long-press restart. Media must recover without app createGroup/connect/discoverPeers/removeGroup calls.
+5. Exit via TV back/notification: no app media socket/audio remains; the system P2P network is not removed.
+6. Change wifi_display_on externally during APP mode; app shutdown must preserve that external value.
 
-本项目仅用于学习和研究目的。
+~~~sh
+adb shell ss -tnp
+adb shell ss -unap
+adb logcat -v time
+~~~
+
+Filter for Miracast, WFD, RTP and VideoDecoder. On restricted firmware PID socket visibility may require device debugging privileges.
+
+Secondary locales fall back to English for receiver status/mode copy; English and Simplified Chinese are supplied for the new feature. Existing Media3 API use is explicitly opted in, the adb-grantable secure-settings declaration is documented for lint, and AppCompat icons use app:tint.
+
+## Provenance and review
+
+Base: 3208713c738fc62acc3bf12e140825575ee885ce. Reference takeoveroff: 0e9fd15c4b19fe275a3a511a78adce4ba60f8064. Neither source branch is changed. Earlier three-mode proposals in GPTPlan are historical; its final APP/SYSTEM media ownership definition is the implemented specification.
+
+[Design](docs/superpowers/specs/2026-11-10-system-p2p-app-media-design.md) / [Implementation plan](docs/superpowers/plans/2026-11-10-system-p2p-app-media.md) / [Execution evidence](docs/superpowers/plans/2026-11-10-system-p2p-app-media-progress.md).

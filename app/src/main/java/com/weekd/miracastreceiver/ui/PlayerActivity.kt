@@ -68,6 +68,7 @@ import java.net.URL
 /**
  * 投屏播放页面
  */
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
 class PlayerActivity : AppCompatActivity() {
 
     companion object {

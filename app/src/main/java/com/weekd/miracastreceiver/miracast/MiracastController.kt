@@ -36,31 +36,35 @@ class MiracastController(context: Context, private val observer: WifiP2pObserver
     private val state = MiracastRuntime.state
     @Volatile private var stopping = false
     private var groupReady = false
+    private var observationsAllowed = false
     private var healthJob: Job? = null
     private val lifecycle = MiracastMediaLifecycle(
         prepareSystemP2p = { withContext(Dispatchers.IO) { handoff.prepare() } },
-        startObserver = { observer.start() }, stopObserver = { observer.stop() },
+        startObserver = { observationsAllowed = true; observer.start() }, stopObserver = { observer.stop() },
         startMedia = { wfd.start() },
-        stopMedia = { withContext(Dispatchers.IO) { wfd.stopAndAwait() } },
+        stopMedia = { observationsAllowed = false; groupReady = false; withContext(Dispatchers.IO) { wfd.stopAndAwait() } },
         restoreSetting = { handoff.restore() }, initiallyNeedsCleanup = handoff.needsRestore
     )
     init {
         observer.onGroupFormed = { info ->
-            if (!stopping) {
+            if (!stopping && observationsAllowed) {
                 groupReady = true
                 wfd.triggerScan(info)
                 if (lifecycle.appActive) state.value = MiracastState.AppActive(true, false)
             }
         }
         observer.onGroupDropped = {
-            groupReady = false
-            if (!stopping && lifecycle.appActive) {
+            if (!stopping && observationsAllowed) {
+                groupReady = false
                 wfd.onGroupDropped()
-                state.value = MiracastState.AppActive(false, false)
+                if (lifecycle.appActive) state.value = MiracastState.AppActive(false, false)
             }
         }
         observer.onUnavailable = {
+            val generation = lifecycle.observationGeneration
             if (!stopping) scope.launch { mutex.withLock {
+                if (stopping || !lifecycle.acceptsObservationFailure(generation)) return@withLock
+                healthJob?.cancel()
                 lifecycle.enterSystem()
                 state.value = MiracastState.Failed(MiracastError.PERMISSION_MISSING)
             } }

@@ -13,6 +13,9 @@ internal class MiracastMediaLifecycle(
     var appActive = false
         private set
     private var needsCleanup = initiallyNeedsCleanup
+    var observationGeneration = 0
+        private set
+    fun acceptsObservationFailure(generation: Int): Boolean = appActive && generation == observationGeneration
 
     suspend fun enterApp(force: Boolean = false): Boolean {
         if (appActive && !force) return true
@@ -20,6 +23,7 @@ internal class MiracastMediaLifecycle(
         needsCleanup = true
         try {
             if (!prepareSystemP2p()) { enterSystem(); return false }
+            observationGeneration++
             startObserver()
             startMedia()
             appActive = true
@@ -31,6 +35,7 @@ internal class MiracastMediaLifecycle(
     }
 
     suspend fun enterSystem(): Boolean {
+        observationGeneration++
         appActive = false
         if (!needsCleanup) return true
         val mediaOk = runCatching { stopMedia() }.getOrDefault(false)

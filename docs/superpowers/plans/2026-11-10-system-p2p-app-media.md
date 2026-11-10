@@ -22,19 +22,19 @@
 ### Task 1: Observer and media lifecycle
 **Files:** MiracastController.kt, WifiP2pObserver.kt, SystemP2pHandoff.kt, MiracastMediaLifecycle.kt, WifiDisplaySetting.kt, MiracastMode.kt, MiracastMediaLifecycleTest.kt.
 **Interfaces:** lifecycle enterApp(force: Boolean): Boolean / enterSystem(): Boolean; observer start()/stop()/refresh(), connection callbacks; WfdServer start()/stopAndAwait().
-- [ ] Write lifecycle tests for repeated mode entry, forced restart, stop/handoff failure and retry. Run testDebugUnitTest and observe expected missing-feature failure.
-- [ ] Implement system-only observation and guarded setting handoff; replace active P2P controller paths. Run full suite.
-- [ ] Integrate service and UI, remove active P2P setting/copy, preserve explicit exit and make remote disconnect resumable. Commit task with progress evidence.
+- [x] Write lifecycle tests for repeated mode entry, forced restart, stop/handoff failure and retry. Run testDebugUnitTest and observe expected missing-feature failure.
+- [x] Implement system-only observation and guarded setting handoff; replace active P2P controller paths. Run full suite.
+- [x] Integrate service and UI, remove active P2P setting/copy, preserve explicit exit and make remote disconnect resumable. Commit task with progress evidence.
 
 ### Task 2: Media protocol reliability
 **Files:** RtpReceiver.kt, WfdServer.kt, WfdSessionHandler.kt, RtpSequenceTracker.kt, P2pSubnet.kt and corresponding tests.
 **Interfaces:** RtpReceiver.start(): Boolean; matching RTSP CSeq state; WfdServer.onGroupDropped(); bounded IPv4 candidates.
-- [ ] Write loopback and sequence/prefix regression tests; run to establish failure.
-- [ ] Confirm bind before creating RTSP handler; match successful response CSeq; count forward gaps and separately count late/duplicate packets; scan real prefixes and exclude local address.
-- [ ] Run full suite and commit with progress evidence.
+- [x] Write loopback and sequence/prefix regression tests; run to establish failure.
+- [x] Confirm bind before creating RTSP handler; match successful response CSeq; count forward gaps and separately count late/duplicate packets; scan real prefixes and exclude local address.
+- [x] Run full suite and commit with progress evidence.
 
 ### Task 3: Build, review and publish
 **Files:** README.md, app/build.gradle.kts, source GPTPlan/GPTReview.md, acceptance documentation.
-- [ ] Record architecture, setting adapter limits, provenance and hardware validation commands; identify feature build in versionName.
-- [ ] Run testDebugUnitTest assembleDebug lintDebug, review complete diff with independent reviewer, fix important findings and reverify.
+- [x] Record architecture, setting adapter limits, provenance and hardware validation commands; identify feature build in versionName.
+- [x] Run testDebugUnitTest assembleDebug lintDebug, review complete diff with independent reviewer, fix important findings and reverify.
 - [ ] Push only the new feature branch, verify remote source SHAs and report APK locations and remaining hardware checks.

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 默认语言（英文）。其他语言见 values-zh、values-zh-rTW 等目录，新增条目时要同步补齐。 -->
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="auto_rotate_to_fit">Auto-rotate to fit screen</string>
     <string name="app_name" translatable="false">Miracast Receiver</string>
 
@@ -19,22 +19,22 @@
     <string name="status_no_network">No network connection</string>
     <string name="status_no_wifi">Not connected to Wi-Fi</string>
     <string name="status_service_starting">Starting service…</string>
-    <string name="status_waiting_network">Waiting for a network address. Check the network connection.</string>
-    <string name="status_receiver_running">Receiver service is running. Waiting for a connection.</string>
-    <string name="status_receiver_stopped">Receiver service is stopped. Reopen the app to retry.</string>
-    <string name="status_miracast_checking">Checking Windows / Android screen mirroring…</string>
-    <string name="status_miracast_advertising">Miracast discovery configured. On Windows press Win+K; on Android open wireless display. Discovery also depends on the device driver.</string>
-    <string name="status_miracast_system">System Wi-Fi Display is enabled. If the device is missing from Win+K, open the system screen mirroring receiver and try again; this switch alone does not confirm receiving support.</string>
-    <string name="status_miracast_failed">Windows / Android screen mirroring could not be configured. Check system screen mirroring and Wi-Fi Direct support, then reopen the app to retry. Please include ADB logs if it still fails. Other casting methods can still be used.</string>
-    <string name="status_miracast_unsupported">This device does not provide Wi-Fi Direct, which Windows / Android screen mirroring requires. Use AirPlay, DLNA or VLC Cast.</string>
-    <string name="status_miracast_permission">Windows / Android screen mirroring needs the Nearby devices or Location permission. Grant it in system app settings and reopen the app.</string>
-    <string name="status_miracast_wifi_disabled">Windows / Android screen mirroring needs Wi-Fi Direct. Enable Wi-Fi and reopen the app; an Ethernet connection alone is not enough.</string>
+    <string name="status_waiting_network" tools:ignore="MissingTranslation">Waiting for a network address. Check the network connection.</string>
+    <string name="status_receiver_running" tools:ignore="MissingTranslation">Receiver service is running. Waiting for a connection.</string>
+    <string name="status_receiver_stopped" tools:ignore="MissingTranslation">Receiver service is stopped. Reopen the app to retry.</string>
+    <string name="status_miracast_checking" tools:ignore="MissingTranslation">Checking Windows / Android screen mirroring…</string>
+    <string name="status_miracast_advertising" tools:ignore="MissingTranslation">Miracast discovery configured. On Windows press Win+K; on Android open wireless display. Discovery also depends on the device driver.</string>
+    <string name="status_miracast_system" tools:ignore="MissingTranslation">System Wi-Fi Display is enabled. If the device is missing from Win+K, open the system screen mirroring receiver and try again; this switch alone does not confirm receiving support.</string>
+    <string name="status_miracast_failed" tools:ignore="MissingTranslation">Windows / Android screen mirroring could not be configured. Check system screen mirroring and Wi-Fi Direct support, then reopen the app to retry. Please include ADB logs if it still fails. Other casting methods can still be used.</string>
+    <string name="status_miracast_unsupported" tools:ignore="MissingTranslation">This device does not provide Wi-Fi Direct, which Windows / Android screen mirroring requires. Use AirPlay, DLNA or VLC Cast.</string>
+    <string name="status_miracast_permission" tools:ignore="MissingTranslation">Windows / Android screen mirroring needs the Nearby devices or Location permission. Grant it in system app settings and reopen the app.</string>
+    <string name="status_miracast_wifi_disabled" tools:ignore="MissingTranslation">Windows / Android screen mirroring needs Wi-Fi Direct. Enable Wi-Fi and reopen the app; an Ethernet connection alone is not enough.</string>
     <string name="status_permission_denied">Location permission not granted. Windows wireless casting is unavailable.</string>
-    <string name="miracast_takeover">Use app player for Miracast</string>
-    <string name="miracast_takeover_hint">On: the system connects devices and this app receives and plays the screen, with scale controls. Off: use native system Miracast.</string>
-    <string name="status_miracast_app_active">System P2P ready; waiting for screen in app player</string>
-    <string name="status_miracast_system_active">Native system Miracast selected</string>
-    <string name="miracast_clean_reapply">Restarting app media reception…</string>
+    <string name="miracast_takeover" tools:ignore="MissingTranslation">Use app player for Miracast</string>
+    <string name="miracast_takeover_hint" tools:ignore="MissingTranslation">On: the system connects devices and this app receives and plays the screen, with scale controls. Off: use native system Miracast.</string>
+    <string name="status_miracast_app_active" tools:ignore="MissingTranslation">System P2P ready; waiting for screen in app player</string>
+    <string name="status_miracast_system_active" tools:ignore="MissingTranslation">Native system Miracast selected</string>
+    <string name="miracast_clean_reapply" tools:ignore="MissingTranslation">Restarting app media reception…</string>
 
     <!-- 悬浮窗权限 -->
     <string name="overlay_permission_title">\"Display over other apps\" permission required</string>
@@ -113,6 +113,6 @@
     <string name="notification_channel_description">Keeps the cast receiver service running</string>
     <string name="notification_waiting">Waiting for AirPlay / DLNA / Miracast connections</string>
     <string name="notification_stop_cast">Stop casting</string>
-    <string name="status_miracast_waiting_p2p">Waiting for the system to connect a Miracast device</string>
-    <string name="status_miracast_cannot_write">Cannot enable system Miracast: grant WRITE_SECURE_SETTINGS using adb</string>
+    <string name="status_miracast_waiting_p2p" tools:ignore="MissingTranslation">Waiting for the system to connect a Miracast device</string>
+    <string name="status_miracast_cannot_write" tools:ignore="MissingTranslation">Cannot enable system Miracast: grant WRITE_SECURE_SETTINGS using adb</string>
 </resources>

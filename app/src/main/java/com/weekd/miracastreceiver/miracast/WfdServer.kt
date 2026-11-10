@@ -9,28 +9,20 @@ import java.net.NetworkInterface
 import java.net.Socket
 
 /**
- * Wi-Fi Display (Miracast) 会话发起器。
- *
- * 注意这里**不是** RTSP 服务器 —— WFD 规范里 Source 才是监听方。实测（Windows 11
- * MSMiracastSource）确认：Source 接入 P2P 组后会在自己的 7236 端口等待，Sink 必须
- * 主动连过去，否则双方互等到超时（约 60 秒）后断开。
- *
- * 因此本类的职责是：
- *   1. 在 P2P 网段里找出正在监听 7236 的 Source
- *   2. 连过去，交给 [WfdSessionHandler] 跑 M1–M7
- *   3. 会话期间用 [RtpReceiver] 收 RTP（MPEG-2 TS）
- *
- * 前置条件：Source 能发现本机，依赖 wpa_supplicant 广播 WFD IE，这需要 root 注入
- * （见 [WfdRootHelper]）—— 应用自身调 setWFDInfo 会被系统拒绝。
- *
- * @param port Source 的 RTSP 监听端口（WFD 标准 7236）
- * @param rtpPort 本机接收 RTP 的 UDP 端口
+ * WFD Sink session client: system-managed P2P provides the network and Sink advertising.
+ * The app connects to Source TCP 7236 and owns RTSP/RTP and custom playback only.
+ * No root advertising or active P2P management takes place here.
  */
-class WfdServer(
+class WfdServer internal constructor(
     private val context: Context,
-    private val port: Int = 7236,
-    private val rtpPort: Int = 19000
+    private val port: Int,
+    private val rtpPort: Int,
+    private val subnetProvider: () -> List<P2pSubnet>
 ) {
+    constructor(context: Context, port: Int = 7236, rtpPort: Int = 19000) :
+        this(context, port, rtpPort, ::readSystemP2pSubnets)
+    @Volatile private var groupAvailable = true
+    @Volatile private var networkGeneration = 0L
     private var scope: CoroutineScope? = null
     private val sessionLock = Any()
     private val sockets = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Socket, Boolean>())
@@ -51,11 +43,7 @@ class WfdServer(
     var onStreamStarted: ((rtpPort: Int) -> Unit)? = null
     var onStreamStopped: (() -> Unit)? = null
 
-    /**
-     * RTSP 握手阶段失败（连上了 7236 但没走到 PLAY）。
-     * 典型原因：OPPO 还没释放上次的通道（"传输通道被占用"），或握手超时。
-     * Controller 接到后应拆 P2P 组，让 OPPO 重置 WFD 状态机，再重建。
-     */
+    /** Handshake failure: close media and rescan, leaving system P2P intact. */
     var onSessionFailed: (() -> Unit)? = null
 
     companion object {
@@ -92,9 +80,10 @@ class WfdServer(
                         continue
                     }
                     triggerImmediate = false
-                    val socket = dialSource()
+                    val generation = networkGeneration
+                    val socket = dialSource(generation)
                     if (socket != null) {
-                        runSession(socket)
+                        runSession(socket, generation)
                     }
                 } catch (e: Exception) {
                     if (isRunning) Timber.e(e, "WFD session loop error")
@@ -116,11 +105,12 @@ class WfdServer(
      * 而 Source 那边看到会话刚建立就断开，直接报"连接失败"。
      * 所以扫描成功的那条 socket 直接用作会话连接。
      */
-    private suspend fun dialSource(): Socket? = coroutineScope {
+    private suspend fun dialSource(generation: Long): Socket? = coroutineScope {
+        if (!scanValid(generation)) return@coroutineScope null
         // p2p0 接口在 P2P-GROUP-FORMATION-SUCCESS 后还需要几秒才拿到 DHCP 地址，
         // 轮询等它就绪，最多等 15 秒，再开始扫描。
         val subnetDeadline = android.os.SystemClock.elapsedRealtime() + 15_000L
-        while (isRunning && p2pSubnets().isEmpty()) {
+        while (scanValid(generation) && p2pSubnets().isEmpty()) {
             if (android.os.SystemClock.elapsedRealtime() >= subnetDeadline) {
                 Timber.w("WFD: dialSource timed out waiting for p2p subnet")
                 return@coroutineScope null
@@ -135,7 +125,7 @@ class WfdServer(
             val goAddr = groupOwnerAddress
             if (goAddr != null) {
                 Timber.i("WFD: TV is P2P client, dialing GO directly at $goAddr")
-                val s = tryConnect(goAddr)
+                val s = tryConnect(goAddr, generation)
                 if (s != null) return@coroutineScope s
                 Timber.w("WFD: direct dial to GO $goAddr failed")
             }
@@ -144,8 +134,8 @@ class WfdServer(
         val candidates = p2pSubnets().flatMap { it.candidates() }.distinct()
         Timber.d("WFD: scanning " + candidates.size + " P2P addresses")
         for (chunk in candidates.chunked(SCAN_CHUNK)) {
-            if (!isRunning) return@coroutineScope null
-            val connected = chunk.map { ip -> async { tryConnect(ip) } }.awaitAll().filterNotNull()
+            if (!scanValid(generation)) return@coroutineScope null
+            val connected = chunk.map { ip -> async { tryConnect(ip, generation) } }.awaitAll().filterNotNull()
             if (connected.isNotEmpty()) {
                 val session = connected.first()
                 connected.drop(1).forEach { runCatching { it.close() }; sockets.remove(it) }
@@ -157,15 +147,20 @@ class WfdServer(
         null
     }
 
-    private fun tryConnect(ip: String): Socket? {
+    private fun scanValid(generation: Long): Boolean = isRunning && groupAvailable && networkGeneration == generation
+
+    private fun tryConnect(ip: String, generation: Long): Socket? {
         val s = Socket()
         synchronized(sessionLock) {
-            if (!isRunning) { s.close(); return null }
+            if (!scanValid(generation)) { s.close(); return null }
             sockets.add(s)
         }
         return try {
             s.connect(InetSocketAddress(ip, port), CONNECT_TIMEOUT_MS)
-            s
+            synchronized(sessionLock) {
+                if (scanValid(generation)) s
+                else { s.close(); sockets.remove(s); null }
+            }
         } catch (e: Exception) {
             runCatching { s.close() }
             sockets.remove(s)
@@ -177,22 +172,13 @@ class WfdServer(
      * 取本机 P2P 接口的 /24 前缀（通常是 "192.168.49."）。
      * 组主地址本身要排除掉，剩下的就是 Source 可能拿到的地址。
      */
-    private fun p2pSubnets(): List<P2pSubnet> = try {
-        NetworkInterface.getNetworkInterfaces().toList()
-            .filter { it.name.startsWith("p2p") && it.isUp }
-            .flatMap { it.interfaceAddresses }
-            .filter { !it.address.isLoopbackAddress && it.address.address.size == 4 }
-            .map { P2pSubnet(it.address.hostAddress!!, it.networkPrefixLength.toInt()) }
-    } catch (e: Exception) {
-        Timber.w(e, "WFD: cannot read system P2P interfaces")
-        emptyList()
-    }
+    private fun p2pSubnets(): List<P2pSubnet> = subnetProvider()
 
     /** 在已连接的 socket 上跑完整个会话；结束后返回，外层循环继续等待下一次投屏。 */
-    private fun runSession(socket: Socket) {
+    private fun runSession(socket: Socket, generation: Long) {
         var streamStarted = false
         val (receiver, handler) = synchronized(sessionLock) {
-        if (!isRunning) { socket.close(); sockets.remove(socket); return }
+        if (!scanValid(generation)) { socket.close(); sockets.remove(socket); return }
         val sourceIp = socket.inetAddress.hostAddress ?: "unknown"
         onConnectionRequested?.invoke("Windows PC", sourceIp)
 
@@ -234,7 +220,7 @@ class WfdServer(
             // 只有在没收到 PLAY 且不是我们主动关闭时，才认为是握手失败（"通道占用"）。
             // stop() 和 disconnectSender() 调用时 closedByUs=true，不触发 P2P reset。
             if (!streamStarted && !closedByUs) {
-                Timber.w("WFD: session ended without PLAY (channel busy or handshake failed), requesting P2P reset")
+                Timber.w("WFD: session ended without PLAY (channel busy or handshake failed), resuming media scan")
                 onSessionFailed?.invoke()
             }
         }
@@ -242,6 +228,7 @@ class WfdServer(
 
     /** P2P 组已形成，立刻触发一次扫描，不等 3 秒周期。 */
     fun triggerScan(info: WifiP2pInfo) {
+        synchronized(sessionLock) { groupAvailable = info.groupFormed }
         groupFormedAtMs = android.os.SystemClock.elapsedRealtime()
         tvIsGroupOwner = info.isGroupOwner
         groupOwnerAddress = info.groupOwnerAddress?.hostAddress
@@ -254,15 +241,22 @@ class WfdServer(
 
     /** Lost system group: close media/probes, without changing P2P. */
     fun onGroupDropped() {
-        groupOwnerAddress = null
-        groupFormedAtMs = 0L
-        disconnectSender()
-        sockets.forEach { runCatching { it.close() } }
+        synchronized(sessionLock) {
+            groupAvailable = false
+            networkGeneration++
+            groupOwnerAddress = null
+            groupFormedAtMs = 0L
+            closedByUs = true
+            sockets.forEach { runCatching { it.close() } }
+            sockets.clear()
+            rtpReceiver?.stop()
+        }
     }
 
     fun stop() {
         synchronized(sessionLock) {
         isRunning = false
+        networkGeneration++
         closedByUs = true
         // Send TEARDOWN before closing the socket so Source can clean up its WFD state machine.
         // disconnectSender() is synchronous on the caller thread here (no scope needed).
@@ -300,3 +294,14 @@ class WfdServer(
         scope?.launch { runCatching { current?.disconnectSender() } }
     }
 }
+
+private fun readSystemP2pSubnets(): List<P2pSubnet> = try {
+        NetworkInterface.getNetworkInterfaces().toList()
+            .filter { it.name.startsWith("p2p") && it.isUp }
+            .flatMap { it.interfaceAddresses }
+            .filter { !it.address.isLoopbackAddress && it.address.address.size == 4 }
+            .map { P2pSubnet(it.address.hostAddress!!, it.networkPrefixLength.toInt()) }
+    } catch (e: Exception) {
+        Timber.w(e, "WFD: cannot read system P2P interfaces")
+        emptyList()
+    }

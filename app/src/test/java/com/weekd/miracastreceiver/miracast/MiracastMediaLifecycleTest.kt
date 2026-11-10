@@ -70,4 +70,20 @@ class MiracastMediaLifecycleTest {
         restoreOk = true
         assertTrue(lifecycle.enterApp())
     }
+
+    @Test fun queuedFailureFromOldObserverCannotStopReplacementAppSession() = runBlocking {
+        lifecycle.enterApp()
+        val oldGeneration = lifecycle.observationGeneration
+        lifecycle.enterApp(force = true)
+        assertFalse(lifecycle.acceptsObservationFailure(oldGeneration))
+        assertTrue(lifecycle.appActive)
+        assertTrue(lifecycle.acceptsObservationFailure(lifecycle.observationGeneration))
+    }
+
+    @Test fun queuedFailureAfterAppToSystemIsIgnored() = runBlocking {
+        lifecycle.enterApp()
+        val oldGeneration = lifecycle.observationGeneration
+        lifecycle.enterSystem()
+        assertFalse(lifecycle.acceptsObservationFailure(oldGeneration))
+    }
 }

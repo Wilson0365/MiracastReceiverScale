@@ -8,6 +8,7 @@ import timber.log.Timber
 object WifiDisplaySetting {
     private const val KEY = "wifi_display_on"
     const val SYSTEM_P2P_ENABLED = 1
+    val uri: android.net.Uri get() = Settings.Global.getUriFor(KEY)
     fun current(ctx: Context): Int? = try { Settings.Global.getInt(ctx.contentResolver, KEY) }
         catch (_: Settings.SettingNotFoundException) { null }
     fun writeValue(ctx: Context, target: Int?): Boolean {
