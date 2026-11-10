@@ -31,12 +31,20 @@ import com.weekd.miracastreceiver.dlna.SsdpServer
 import com.weekd.miracastreceiver.dlna.UpnpHttpServer
 import com.weekd.miracastreceiver.miracast.MiracastController
 import com.weekd.miracastreceiver.miracast.MiracastRuntime
+import com.weekd.miracastreceiver.miracast.MiracastMode
+import com.weekd.miracastreceiver.miracast.MiracastModeStore
 import com.weekd.miracastreceiver.miracast.WfdServer
 import com.weekd.miracastreceiver.miracast.WifiDirectManager
 import com.weekd.miracastreceiver.util.AppLanguage
 import com.weekd.miracastreceiver.utils.NetworkUtils
 import timber.log.Timber
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 投屏接收后台服务
@@ -49,6 +57,13 @@ class CastReceiverService : Service() {
         const val EXTRA_FROM_BOOT = "from_boot"
 
         private const val ACTION_STOP_CAST = "com.weekd.miracastreceiver.STOP_CAST"
+        const val ACTION_EXIT_RECEIVER = "com.weekd.miracastreceiver.EXIT_RECEIVER"
+        const val EXTRA_MANUAL_START = "manual_start"
+
+        fun requestExit(context: Context) {
+            MiracastModeStore.set(context, MiracastMode.SYSTEM)
+            context.startService(Intent(context, CastReceiverService::class.java).setAction(ACTION_EXIT_RECEIVER))
+        }
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "cast_receiver_service"
         private const val ACTION_UPDATE_POSITION = "com.weekd.miracastreceiver.ACTION_UPDATE_POSITION"
@@ -77,16 +92,22 @@ class CastReceiverService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var networkWaitRunnable: Runnable? = null
     private var networkWaitElapsedMs = 0L
-    private var stopping = false
+    @Volatile private var stopping = false
+    @Volatile private var miracastSessionStarted = false
+    private var receiversStopped = false
+    private var restartRequested = false
+    private val exitScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val playerStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            if (stopping) return
             when (intent?.action) {
                 CastPlayerBridge.ACTION_STATE -> castPlayerBridge.onState(intent)
                 "com.weekd.miracastreceiver.DISCONNECT_SENDER" -> {
                     if (intent.getBooleanExtra("miracast", false)) {
                         MiracastRuntime.controller?.disconnectSender()
                     } else {
+                        airPlayPlayerStarted = false
                         airPlayReceiver.disconnectSender()
                     }
                 }
@@ -155,7 +176,7 @@ class CastReceiverService : Service() {
             videoSurfaceProvider = { com.weekd.miracastreceiver.ui.PlayerActivity.mirrorSurface },
             onStateChanged = { state ->
                 Timber.i("AirPlay state: $state")
-                if (state == com.weekd.miracastreceiver.airplay.AirPlayState.CONNECTED && !airPlayPlayerStarted) {
+                if (!stopping && state == com.weekd.miracastreceiver.airplay.AirPlayState.CONNECTED && !airPlayPlayerStarted) {
                     airPlayPlayerStarted = true
                     val intent = Intent(this, com.weekd.miracastreceiver.ui.PlayerActivity::class.java).apply {
                         putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_MEDIA_TITLE, getString(R.string.title_iphone_mirror))
@@ -165,8 +186,10 @@ class CastReceiverService : Service() {
                     startActivity(intent)
                 }
             },
-            onSessionEnded = {
-                if (airPlayPlayerStarted) {
+            onSessionEnded = { wasMirroring ->
+                if (!stopping && wasMirroring) {
+                    beginExit()
+                } else if (!stopping && airPlayPlayerStarted) {
                     airPlayPlayerStarted = false
                     Timber.i("AirPlay session ended, closing player")
                     sendBroadcast(Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_STOP).apply {
@@ -221,6 +244,7 @@ class CastReceiverService : Service() {
     }
 
     private fun initMiracastController() {
+        if (::miracast.isInitialized) return
         val deviceName = DeviceInfoProvider(this).getDeviceName()
         val wfdServer = WfdServer(this, 7236).apply {
             onConnectionRequested = { clientName, clientAddress ->
@@ -230,15 +254,16 @@ class CastReceiverService : Service() {
                 Timber.i("Miracast session established: $sessionId")
             }
             onStreamStarted = { rtpPort ->
+                miracastSessionStarted = true
                 Timber.i("Miracast stream started on RTP port: $rtpPort")
             }
             onStreamStopped = {
+                val endedMirroring = miracastSessionStarted
+                miracastSessionStarted = false
                 Timber.i("Miracast stream stopped, closing player")
                 // Windows 断开（RTSP 连接关闭或 TEARDOWN）后必须主动关掉播放页，
                 // 否则手机会一直停在最后一帧画面上
-                sendBroadcast(Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_STOP).apply {
-                    setPackage(packageName)
-                })
+                mainHandler.post { if (!stopping && endedMirroring) beginExit() }
             }
         }
         val p2p = WifiDirectManager(this, deviceName)
@@ -255,90 +280,106 @@ class CastReceiverService : Service() {
 
         // 设置回调
         dlnaRenderer.onSetUri = { uri, metadata ->
-            Timber.i("DLNA SetURI: $uri")
-            val state = dlnaRenderer.getState()
-            // 启动 PlayerActivity 并播放
-            val intent = Intent(this, com.weekd.miracastreceiver.ui.PlayerActivity::class.java).apply {
-                if (state.playlist.size > 1) {
-                    putStringArrayListExtra(
-                        com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_MEDIA_URIS,
-                        ArrayList(state.playlist)
-                    )
-                    putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_START_INDEX, state.currentIndex)
-                } else {
-                    putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_MEDIA_URI, uri)
+            dispatchPlayback {
+                Timber.i("DLNA SetURI: $uri")
+                val state = dlnaRenderer.getState()
+                // 启动 PlayerActivity 并播放
+                val intent = Intent(this, com.weekd.miracastreceiver.ui.PlayerActivity::class.java).apply {
+                    if (state.playlist.size > 1) {
+                        putStringArrayListExtra(
+                            com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_MEDIA_URIS,
+                            ArrayList(state.playlist)
+                        )
+                        putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_START_INDEX, state.currentIndex)
+                    } else {
+                        putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_MEDIA_URI, uri)
+                    }
+                    putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_MEDIA_TITLE, extractTitle(metadata))
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 }
-                putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_MEDIA_TITLE, extractTitle(metadata))
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                startActivity(intent)
             }
-            startActivity(intent)
         }
 
         dlnaRenderer.onPlay = {
-            Timber.i("DLNA Play")
-            // 发送播放广播到 PlayerActivity
-            val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_PLAY).apply {
-                setPackage(packageName)
+            dispatchPlayback {
+                Timber.i("DLNA Play")
+                // 发送播放广播到 PlayerActivity
+                val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_PLAY).apply {
+                    setPackage(packageName)
+                }
+                sendBroadcast(intent)
             }
-            sendBroadcast(intent)
         }
 
         dlnaRenderer.onPause = {
-            Timber.i("DLNA Pause")
-            // 发送暂停广播到 PlayerActivity
-            val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_PAUSE).apply {
-                setPackage(packageName)
+            dispatchPlayback {
+                Timber.i("DLNA Pause")
+                // 发送暂停广播到 PlayerActivity
+                val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_PAUSE).apply {
+                    setPackage(packageName)
+                }
+                sendBroadcast(intent)
             }
-            sendBroadcast(intent)
         }
 
         dlnaRenderer.onStop = {
-            Timber.i("DLNA Stop")
-            // 发送停止广播到 PlayerActivity
-            val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_STOP).apply {
-                setPackage(packageName)
+            dispatchPlayback {
+                Timber.i("DLNA Stop")
+                // 发送停止广播到 PlayerActivity
+                val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_STOP).apply {
+                    setPackage(packageName)
+                }
+                sendBroadcast(intent)
             }
-            sendBroadcast(intent)
         }
 
         dlnaRenderer.onSeek = { position ->
-            Timber.i("DLNA Seek: $position")
-            // 发送跳转广播到 PlayerActivity
-            val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_SEEK).apply {
-                putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_SEEK_POSITION, position)
-                setPackage(packageName)
+            dispatchPlayback {
+                Timber.i("DLNA Seek: $position")
+                // 发送跳转广播到 PlayerActivity
+                val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_SEEK).apply {
+                    putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_SEEK_POSITION, position)
+                    setPackage(packageName)
+                }
+                sendBroadcast(intent)
             }
-            sendBroadcast(intent)
         }
 
         dlnaRenderer.onVolumeChanged = { volume ->
-            Timber.i("DLNA Volume: $volume")
-            // 发送音量广播到 PlayerActivity
-            val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_SET_VOLUME).apply {
-                putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_VOLUME, volume)
-                setPackage(packageName)
+            dispatchPlayback {
+                Timber.i("DLNA Volume: $volume")
+                // 发送音量广播到 PlayerActivity
+                val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_SET_VOLUME).apply {
+                    putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_VOLUME, volume)
+                    setPackage(packageName)
+                }
+                sendBroadcast(intent)
             }
-            sendBroadcast(intent)
         }
 
         dlnaRenderer.onSpeedChanged = { speed ->
-            Timber.i("DLNA Speed: $speed")
-            // 发送播放速度广播到 PlayerActivity
-            val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_SET_SPEED).apply {
-                putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_SPEED, speed)
-                setPackage(packageName)
+            dispatchPlayback {
+                Timber.i("DLNA Speed: $speed")
+                // 发送播放速度广播到 PlayerActivity
+                val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_SET_SPEED).apply {
+                    putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_SPEED, speed)
+                    setPackage(packageName)
+                }
+                sendBroadcast(intent)
             }
-            sendBroadcast(intent)
         }
 
         dlnaRenderer.onQualityUriChanged = { uri ->
-            Timber.i("DLNA Quality URI: $uri")
-            // 发送画质 URI 变化广播到 PlayerActivity
-            val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_SET_QUALITY_URL).apply {
-                putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_QUALITY_URI, uri)
-                setPackage(packageName)
+            dispatchPlayback {
+                Timber.i("DLNA Quality URI: $uri")
+                // 发送画质 URI 变化广播到 PlayerActivity
+                val intent = Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_SET_QUALITY_URL).apply {
+                    putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_QUALITY_URI, uri)
+                    setPackage(packageName)
+                }
+                sendBroadcast(intent)
             }
-            sendBroadcast(intent)
         }
 
         // 创建 UPnP HTTP 服务器
@@ -362,6 +403,10 @@ class CastReceiverService : Service() {
         )
     }
 
+    private fun dispatchPlayback(action: () -> Unit) {
+        mainHandler.post { if (!stopping) action() }
+    }
+
     private fun extractTitle(metadata: String): String {
         // 简单解析 DIDL-Lite metadata 中的 title
         val titlePattern = Regex("<dc:title>(.*?)</dc:title>", RegexOption.IGNORE_CASE)
@@ -370,13 +415,12 @@ class CastReceiverService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP_CAST) {
-            // Stop the service as well as the player: audio can outlive its Surface/Activity.
-            airPlayPlayerStarted = false
-            sendBroadcast(Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_STOP).apply {
-                setPackage(packageName)
-            })
-            stopSelf()
+        if (intent?.action == ACTION_STOP_CAST || intent?.action == ACTION_EXIT_RECEIVER) {
+            beginExit()
+            return START_NOT_STICKY
+        }
+        if (stopping) {
+            if (intent?.getBooleanExtra(EXTRA_MANUAL_START, false) == true) restartRequested = true
             return START_NOT_STICKY
         }
         val fromBoot = intent?.getBooleanExtra(EXTRA_FROM_BOOT, false) ?: false
@@ -386,6 +430,57 @@ class CastReceiverService : Service() {
         startWhenNetworkReady()
 
         return START_STICKY
+    }
+
+    private fun beginExit() {
+        if (stopping) return
+        stopping = true
+        airPlayPlayerStarted = false
+        if (::castPlayerBridge.isInitialized) castPlayerBridge.stop()
+        networkWaitRunnable?.let { mainHandler.removeCallbacks(it) }
+        networkWaitRunnable = null
+        sendReceiverExitStop()
+        val exit = ReceiverExit(
+            saveSystem = { withContext(Dispatchers.IO) { MiracastModeStore.set(this@CastReceiverService, MiracastMode.SYSTEM) } },
+            cleanupMiracast = {
+                // Residue cleanup does not require LAN readiness or starting any receiver.
+                initMiracastController()
+                var airPlayClean = true
+                if (initialized) {
+                    // Stop audio immediately, rather than leaving it playing during P2P timeouts.
+                    airPlayClean = withContext(Dispatchers.IO) { airPlayReceiver.stopAndAwait() }
+                }
+                val miracastClean = miracast.shutdownAndAwait()
+                airPlayClean && miracastClean
+            },
+            stopReceivers = { withContext(Dispatchers.IO) { stopOtherReceivers() } },
+            finish = {
+                sendReceiverExitStop()
+                ReceiverStatus.service = ReceiverStatus.Service.STOPPED
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        )
+        exitScope.launch {
+            runCatching { exit.exit() }.onSuccess { clean ->
+                Timber.i("Receiver exit completed (Miracast clean=$clean)")
+            }.onFailure { Timber.e(it, "Receiver exit failed") }
+        }
+    }
+
+    private fun sendReceiverExitStop() {
+        sendBroadcast(Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_STOP)
+            .setPackage(packageName).putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_EXIT_RECEIVER, true))
+    }
+
+    private fun stopOtherReceivers() {
+        if (!initialized || receiversStopped) return
+        receiversStopped = true
+        com.weekd.miracastreceiver.ui.PlayerActivity.mirrorSurfaceListener = null
+        runCatching { airPlayReceiver.stop() }.onFailure { Timber.e(it, "AirPlay stop failed") }
+        runCatching { ssdpServer.stop() }.onFailure { Timber.e(it, "SSDP stop failed") }
+        runCatching { upnpHttpServer.stop() }.onFailure { Timber.e(it, "UPnP stop failed") }
+        runCatching { googleCastReceiver.stop() }.onFailure { Timber.e(it, "Cast stop failed") }
     }
 
     /**
@@ -412,6 +507,7 @@ class CastReceiverService : Service() {
      * 结果就是服务活着但手机搜不到设备。这里每 5 秒看一次，最多等 5 分钟。
      */
     private fun startWhenNetworkReady() {
+        if (stopping) return
         networkWaitRunnable?.let { mainHandler.removeCallbacks(it) }
         networkWaitRunnable = null
 
@@ -449,6 +545,7 @@ class CastReceiverService : Service() {
     }
 
     private fun startAllServices() {
+        if (stopping) return
         servicesStarted = true
         // 启动 AirPlay 2 接收器
         airPlayReceiver.start()
@@ -487,26 +584,21 @@ class CastReceiverService : Service() {
         networkWaitRunnable = null
 
         // 还没等到网络就被停掉时，下面那些 lateinit 字段根本没初始化，碰了会崩。
-        if (!initialized) return
-
-        try {
+        if (initialized) try {
             unregisterReceiver(playerStateReceiver)
         } catch (e: Exception) {
             Timber.e(e, "Error unregistering playerStateReceiver")
         }
 
-        // 停止 AirPlay 2 接收器
-        com.weekd.miracastreceiver.ui.PlayerActivity.mirrorSurfaceListener = null
-        airPlayReceiver.stop()
-
-        // 停止 DLNA/UPnP 服务
-        ssdpServer.stop()
-        upnpHttpServer.stop()
-        googleCastReceiver.stop()
-        castPlayerBridge.stop()
-
-        // 还给电视，清理 P2P 状态
-        miracast.shutdown()
+        if (!receiversStopped) {
+            if (::castPlayerBridge.isInitialized) castPlayerBridge.stop()
+            stopOtherReceivers()
+            if (::miracast.isInitialized) miracast.shutdown()
+        }
+        exitScope.cancel()
+        if (restartRequested) mainHandler.post {
+            startService(Intent(this, CastReceiverService::class.java))
+        }
     }
 
     private fun generateDeviceUuid(): String {

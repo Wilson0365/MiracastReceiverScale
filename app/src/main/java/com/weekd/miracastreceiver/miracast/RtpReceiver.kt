@@ -30,6 +30,7 @@ class RtpReceiver(
 
     private var socket: DatagramSocket? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val mediaLock = Any()
 
     @Volatile
     private var isRunning = false
@@ -169,7 +170,9 @@ class RtpReceiver(
                 payloadQueue.poll(200, TimeUnit.MILLISECONDS)
             } ?: continue
             try {
-                demuxer.feed(payload, 0, payload.size)
+                synchronized(mediaLock) {
+                    if (isRunning) demuxer.feed(payload, 0, payload.size)
+                }
             } catch (e: Exception) {
                 Timber.e(e, "Error demuxing TS payload")
                 renderer.onDiscontinuity()
@@ -202,19 +205,24 @@ class RtpReceiver(
     fun stop() {
         isRunning = false
         scope.cancel()
-        renderer.release()
-        audioPlayer.release()
-        demuxer.reset()
-        if (active === this) active = null
-
         try {
             socket?.close()
             socket = null
         } catch (e: Exception) {
             Timber.e(e, "Error closing RTP socket")
         }
+        synchronized(mediaLock) {
+            try { renderer.release() } finally { audioPlayer.release() }
+            demuxer.reset()
+        }
+        if (active === this) active = null
         Timber.i("RTP Receiver stopped: $packetsReceived packets, ${bytesReceived / 1024}KB")
     }
+
+    suspend fun awaitStopped(): Boolean = withTimeoutOrNull(5_000L) {
+        scope.coroutineContext[Job]?.join()
+        withContext(Dispatchers.IO) { audioPlayer.awaitStopped() }
+    } ?: false
 
     fun isRunning(): Boolean = isRunning
 }

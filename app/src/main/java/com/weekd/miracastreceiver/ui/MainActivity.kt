@@ -56,6 +56,7 @@ class MainActivity : AppCompatActivity() {
     /** 定位权限弹窗还在时不叠加悬浮窗权限提示，等它有结果再说 */
     private var wifiPermissionPending = false
     private var overlayPromptShown = false
+    private var exitingReceiver = false
 
     companion object {
         private const val REQUEST_CODE_PERMISSIONS = 1001
@@ -224,12 +225,9 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
-        // 自动连接安卓手机开关
-        switchAutoConnectAndroid.isChecked = AppSettings.isAutoConnectAndroid(this)
-        switchAutoConnectAndroid.setOnCheckedChangeListener { _, isChecked ->
-            Timber.i("Auto-connect Android set to $isChecked")
-            MiracastRuntime.setAutoConnectAndroid(this, isChecked)
-        }
+        // 自动连接安卓手机改为内部策略，覆盖旧版本保存的关闭状态。
+        MiracastRuntime.setAutoConnectAndroid(this, true)
+        switchAutoConnectAndroid.isChecked = true
 
         // 界面语言
         findViewById<View>(R.id.setting_language).setOnClickListener { showLanguageDialog() }
@@ -292,7 +290,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startCastService() {
+        if (exitingReceiver) return
         val intent = Intent(this, CastReceiverService::class.java)
+            .putExtra(CastReceiverService.EXTRA_MANUAL_START, true)
         startService(intent)
         Timber.i("Cast receiver service started")
     }
@@ -369,5 +369,14 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         mdnsAdvertiser.stopAdvertising()
         Timber.i("MainActivity destroyed")
+    }
+
+    @android.annotation.SuppressLint("MissingSuperCall") // This exit deliberately clears the entire task.
+    override fun onBackPressed() {
+        if (exitingReceiver) return
+        exitingReceiver = true
+        CastReceiverService.requestExit(this)
+        mdnsAdvertiser.stopAdvertising()
+        finishAffinity()
     }
 }

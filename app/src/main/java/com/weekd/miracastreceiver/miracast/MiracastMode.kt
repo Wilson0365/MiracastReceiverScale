@@ -36,6 +36,7 @@ object MiracastModeStore {
     private const val PREFS = "miracast_mode"
     private const val KEY_MODE = "mode"
     private const val KEY_ROOT_IE = "root_ie_injected"
+    private const val KEY_FRAMEWORK_IE = "framework_ie_injected"
     private const val KEY_CLEAN_PENDING = "clean_pending"
     private const val KEY_SESSION_OPEN = "session_open"
     private const val KEY_LAST_WRITTEN = "last_written"
@@ -49,10 +50,14 @@ object MiracastModeStore {
     }
 
     fun set(ctx: Context, mode: MiracastMode) {
-        prefs(ctx).edit().putString(KEY_MODE, mode.name).apply()
+        check(prefs(ctx).edit().putString(KEY_MODE, mode.name).commit()) { "Cannot persist Miracast mode" }
     }
 
     fun isRootIeInjected(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_ROOT_IE, false)
+    fun isFrameworkIeInjected(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_FRAMEWORK_IE, false)
+    fun setFrameworkIeInjected(ctx: Context, value: Boolean) {
+        check(prefs(ctx).edit().putBoolean(KEY_FRAMEWORK_IE, value).commit())
+    }
 
     fun setRootIeInjected(ctx: Context, value: Boolean) {
         prefs(ctx).edit().putBoolean(KEY_ROOT_IE, value).commit()

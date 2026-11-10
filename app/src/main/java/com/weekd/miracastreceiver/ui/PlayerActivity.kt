@@ -87,6 +87,7 @@ class PlayerActivity : AppCompatActivity() {
         const val ACTION_PLAY = "com.weekd.miracastreceiver.ACTION_PLAY"
         const val ACTION_PAUSE = "com.weekd.miracastreceiver.ACTION_PAUSE"
         const val ACTION_STOP = "com.weekd.miracastreceiver.ACTION_STOP"
+        const val EXTRA_EXIT_RECEIVER = "exit_receiver"
         const val ACTION_SEEK = "com.weekd.miracastreceiver.ACTION_SEEK"
         const val ACTION_SET_VOLUME = "com.weekd.miracastreceiver.ACTION_SET_VOLUME"
         const val ACTION_SET_PLAYLIST = "com.weekd.miracastreceiver.ACTION_SET_PLAYLIST"
@@ -212,7 +213,11 @@ class PlayerActivity : AppCompatActivity() {
                     "PAUSE" -> player?.pause()
                     "SEEK" -> player?.seekTo(value.toLong().coerceAtLeast(0))
                     "VOLUME" -> player?.volume = value.toFloat().coerceIn(0f, 1f)
-                    "STOP" -> { castStoppedBySender = true; stopPlayback(); exitPlayer() }
+                    "STOP" -> {
+                        castStoppedBySender = true
+                        stopPlayback()
+                        exitPlayer(intent.getBooleanExtra(EXTRA_EXIT_RECEIVER, false))
+                    }
                 }
                 reportCastState()
                 return
@@ -225,7 +230,7 @@ class PlayerActivity : AppCompatActivity() {
                 ACTION_PAUSE -> if (isCurrentImage()) stopImageSlideShow() else player?.pause()
                 ACTION_STOP -> {
                     stopPlayback()
-                    exitPlayer()
+                    exitPlayer(intent.getBooleanExtra(EXTRA_EXIT_RECEIVER, false))
                 }
                 ACTION_SEEK -> {
                     val position = intent.getLongExtra(EXTRA_SEEK_POSITION, 0L)
@@ -1686,14 +1691,7 @@ class PlayerActivity : AppCompatActivity() {
         streamInfoJob?.cancel()
         streamInfoJob = null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        // 补发断开通知：onBackPressed 已发过，但系统回收、ACTION_STOP 等路径不经过它。
-        // Controller.disconnectSender() 内部做幂等（closedByUs 守卫），重复发无副作用。
-        if (isFinishing && isMiracastSession) {
-            sendBroadcast(Intent("com.weekd.miracastreceiver.DISCONNECT_SENDER").apply {
-                setPackage(packageName)
-                putExtra("miracast", true)
-            })
-        }
+        // Session teardown belongs to the service; destroying an old page must not stop a new sender.
         // RTP 接收器归 WfdServer 所有（会话结束时由它停止），这里不要碰
         // 只清自己发布的那个，避免新 Activity 已经发布新 Surface 后被旧实例踩掉
         if (mirrorSurface === mirrorHolderSurface || mirrorSurface === mirrorTextureSurface) {
@@ -1719,7 +1717,8 @@ class PlayerActivity : AppCompatActivity() {
      * 开关打开时走另一条路：把设置页带到栈顶再结束播放页。用 CLEAR_TOP + SINGLE_TOP
      * 复用已经在栈里的实例（否则会再叠一个设置页，返回一次才退干净）。
      */
-    private fun exitPlayer() {
+    private fun exitPlayer(receiverExit: Boolean = false) {
+        if (receiverExit) { finishAffinity(); return }
         if (AppSettings.isReturnToAppAfterCast(this)) {
             startActivity(
                 Intent(this, MainActivity::class.java).apply {
@@ -1753,14 +1752,10 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    @android.annotation.SuppressLint("MissingSuperCall") // This exit deliberately clears the entire task.
     override fun onBackPressed() {
-        if (isMirrorSession()) {
-            sendBroadcast(Intent("com.weekd.miracastreceiver.DISCONNECT_SENDER").apply {
-                setPackage(packageName)
-                putExtra("miracast", isMiracastSession)
-            })
-        }
+        com.weekd.miracastreceiver.service.CastReceiverService.requestExit(this)
         stopPlayback(endCastSession = true)
-        exitPlayer()
+        finishAffinity()
     }
 }

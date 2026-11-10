@@ -92,12 +92,14 @@ open class RtspHandler(
     @Volatile private var currentVolume: Float = 0f
 
     private var serverSocket: ServerSocket? = null
+    private val clientLock = Any()
+    private val clients = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Socket, Boolean>())
 
     @Volatile
     private var activeClient: Socket? = null
 
     /** 主控制连接（镜像会话）是否仍然在线。 */
-    val hasActiveSession: Boolean get() = activeClient != null
+    val hasActiveSession: Boolean get() = activeClient?.isClosed == false
 
     @Volatile
     private var running = false
@@ -161,12 +163,11 @@ open class RtspHandler(
 
     /** Stops the RTSP server. */
     fun stop() {
-        running = false
-        try {
-            activeClient?.close()
-            serverSocket?.close()
-        } catch (e: Exception) {
-            Logger.e("Error closing RTSP sockets (non-fatal)", e)
+        synchronized(clientLock) {
+            running = false
+            runCatching { serverSocket?.close() }
+            clients.forEach { runCatching { it.close() } }
+            clients.clear()
         }
         activeClient = null
         serverSocket = null
@@ -208,11 +209,19 @@ open class RtspHandler(
 
     private fun runServer(scope: CoroutineScope) {
         try {
-            serverSocket = bindRtspSocket()
+            val listener = bindRtspSocket()
+            synchronized(clientLock) {
+                if (!running) { listener.close(); return }
+                serverSocket = listener
+            }
             Logger.i("RTSP server listening on port $RTSP_PORT")
 
             while (running && scope.isActive) {
-                val clientSocket = serverSocket!!.accept()
+                val clientSocket = listener.accept()
+                synchronized(clientLock) {
+                    if (!running) { clientSocket.close(); return }
+                    clients.add(clientSocket)
+                }
                 Logger.i("New client connected: ${clientSocket.inetAddress.hostAddress}")
 
                 if (activeClient != null) {
@@ -291,6 +300,7 @@ open class RtspHandler(
                 // Not a session — just free the primary slot; nothing to tear down.
                 activeClient = null
             } else {
+                clients.remove(socket)
                 try {
                     Logger.i("Client disconnected")
                     socket.close()
@@ -348,6 +358,7 @@ open class RtspHandler(
         } catch (e: Exception) {
             if (running) Logger.w("Side connection ($remote) error: ${e.message}")
         } finally {
+            clients.remove(socket)
             runCatching { socket.close() }
             Logger.i("Side connection closed ($remote)")
         }
@@ -409,6 +420,7 @@ open class RtspHandler(
                 if (reverseSocket === socket) { reverseSocket = null; reverseSessionId = null }
             }
             runCatching { socket.close() }
+            clients.remove(socket)
             Logger.i("PTTH event channel closed")
         }
     }

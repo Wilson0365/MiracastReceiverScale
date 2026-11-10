@@ -64,9 +64,10 @@ class CastPlayerBridge(private val context: Context) {
         }
     }
 
-    private fun send(request: CastCommand) {
+    private fun send(request: CastCommand, receiverExit: Boolean = false) {
         context.sendBroadcast(Intent(ACTION_COMMAND).setPackage(context.packageName).apply {
             putExtra(TOKEN, request.token); putExtra(COMMAND, request.type); putExtra(VALUE, request.value)
+            putExtra(PlayerActivity.EXTRA_EXIT_RECEIVER, receiverExit)
         })
     }
 
@@ -86,7 +87,7 @@ class CastPlayerBridge(private val context: Context) {
     }
 
     fun stop() {
-        token?.let { send(CastCommand(it, "STOP")) }
+        token?.let { send(CastCommand(it, "STOP"), receiverExit = true) }
         closed = true; pending.clear(); handler.removeCallbacksAndMessages(null)
     }
 }

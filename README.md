@@ -1,5 +1,16 @@
 # Miracast Receiver — Android TV 投屏接收端
 
+## 1.2.13 接收器退出行为
+
+- Android 手机自动连接作为内部策略开启，主界面隐藏对应开关与说明。
+- 电视在播放页或主界面按返回键：结束当前播放，保存 Miracast SYSTEM 模式，清理 Miracast、AirPlay、DLNA 和 Google Cast，停止前台服务。播放中的设置浮层仍先关闭浮层。
+- DLNA 客户端停止投屏：只结束当前播放，接收服务继续待命。Miracast 或 AirPlay 屏幕镜像的发送端停止：关闭全部接收服务，Miracast 回到 SYSTEM。
+- AirPlay 镜像切换到独立 URL 视频时继续播放，不把控制连接结束误判为整次投屏结束；独立 URL 视频和 Google Cast 客户端停止仍继续待命。
+- AirPlay 本地停止会释放独立 URL 视频，控制连接提前断开也不会留下播放状态。
+- 清理失败保留残留标记，下次启动继续尝试；不会仅凭系统设置写回成功就宣称全部资源已清理。
+
+验证：JVM 回归测试与 release 构建；投屏、电视固件 P2P/WFD 清理和返回后再次连接仍需真机验证。
+
 运行在 Android TV（小米等）上的 Miracast/WFD Sink 应用。核心目标：让自定义播放器成为投屏目标，从而能调整画面比例、做水平平移等系统投屏做不到的事。
 
 ---

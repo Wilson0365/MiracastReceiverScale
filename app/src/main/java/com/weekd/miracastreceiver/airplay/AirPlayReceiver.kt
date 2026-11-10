@@ -13,6 +13,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.ServerSocket
@@ -91,7 +92,7 @@ class AirPlayReceiver(
     /** Pairing PIN to show ([pin]) or hide (null) on the TV during SRP pair-setup. */
     private val onPinChanged: (pin: String?) -> Unit = {},
     /** A real session end, independent of mDNS registration state. Dispatched on Main. */
-    private val onSessionEnded: () -> Unit = {}
+    private val onSessionEnded: (wasMirroring: Boolean) -> Unit = {}
 ) {
 
     // Persistent store of paired controllers (for PIN access control / pair-verify).
@@ -100,9 +101,10 @@ class AirPlayReceiver(
     // SupervisorJob: child coroutine failures don't propagate to siblings.
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + job)
+    @Volatile private var stopping = false
     private val lifecycle = AirPlayLifecycle(
         onStateChanged = { state -> dispatchState(state) },
-        onSessionEnded = { scope.launch(Dispatchers.Main) { onSessionEnded() } }
+        onSessionEnded = { wasMirroring -> scope.launch(Dispatchers.Main) { onSessionEnded(wasMirroring) } }
     )
 
     // Child components
@@ -154,9 +156,12 @@ class AirPlayReceiver(
         Logger.i("AirPlayReceiver starting (displayName='$displayName')")
         scope.launch {
             try {
-                startTimingHandler()
-                startMdnsService()
-                startRtspHandler()
+                synchronized(this@AirPlayReceiver) {
+                    if (stopping) return@launch
+                    startTimingHandler()
+                    startMdnsService()
+                    startRtspHandler()
+                }
             } catch (e: Exception) {
                 Logger.e("Failed to start AirPlayReceiver", e)
                 emitState(AirPlayState.ERROR)
@@ -172,19 +177,26 @@ class AirPlayReceiver(
      *
      * MUST be called when [PhairPlayService] stops or is destroyed.
      */
+    @Synchronized
     fun stop() {
+        if (stopping) return
+        stopping = true
         Logger.i("AirPlayReceiver stopping")
         try {
-            rtspHandler?.stop()
-            timingHandler?.stop()
-            mdnsService?.stop()
-            dacpClient.stop()
-            releaseMediaComponents()
+            lifecycle.stopLocally({ releaseMediaComponents() }, { rtspHandler?.stop() })
         } catch (e: Exception) {
             Logger.e("Error during AirPlayReceiver stop", e)
         } finally {
+            runCatching { timingHandler?.stop() }
+            runCatching { mdnsService?.stop() }
+            runCatching { dacpClient.stop() }
             scope.cancel()
         }
+    }
+
+    suspend fun stopAndAwait(): Boolean {
+        stop()
+        return withTimeoutOrNull(5_000L) { job.join(); true } ?: false
     }
 
     /**
@@ -200,10 +212,9 @@ class AirPlayReceiver(
 
     fun sendRemoteCommand(command: String) = dacpClient.sendCommand(command)
 
+    @Synchronized
     fun disconnectSender() {
-        scope.launch {
-            rtspHandler?.disconnectSender()
-        }
+        lifecycle.stopLocally({ releaseMediaComponents() }, { rtspHandler?.disconnectSender() })
     }
 
     /** True once a sender has advertised DACP reverse-control (so the TV remote can drive playback). */
@@ -278,12 +289,18 @@ class AirPlayReceiver(
      * - audio stream: creates [AudioPlayer]
      * - audio-only:   only [AudioPlayer], app stays on HomeScreen
      */
+    @Synchronized
     private fun onStreamingStarted(session: SessionDescription) {
+        if (stopping || rtspHandler?.hasActiveSession != true) return
+        val generation = lifecycle.mediaGeneration()
         Logger.i("Streaming started — video=${session.hasVideo} audio=${session.hasAudio} " +
                  "audioOnly=${session.isAudioOnly}")
 
         scope.launch {
+            synchronized(this@AirPlayReceiver) {
+            if (stopping || !lifecycle.isCurrentMediaGeneration(generation)) return@launch
             try {
+                if (session.hasVideo) lifecycle.markMirroring()
                 if (session.hasVideo) startVideoDecoder(session)
                 if (session.hasAudio) startAudioPlayer(session)
                 // Legacy (SDP) session: reflect its stream kinds into now-playing state so an
@@ -300,6 +317,7 @@ class AirPlayReceiver(
                 Logger.e("Failed to start media pipeline", e)
                 emitState(AirPlayState.ERROR)
             }
+            }
         }
     }
 
@@ -309,7 +327,10 @@ class AirPlayReceiver(
      * Releases media components and re-advertises so the device reappears
      * in sender pickers immediately.
      */
+    @Synchronized
     private fun onStreamingStopped() {
+        if (stopping) return
+        lifecycle.invalidatePendingStarts()
         if (urlVideoPlayer != null) {
             // 镜像中全屏视频切换为视频投送后，iPhone 会 TEARDOWN 镜像流（甚至断开控制连接），
             // 但视频由电视独立播放，不能跟着停。只释放镜像相关资源，视频结束时再完整收尾。
@@ -323,7 +344,9 @@ class AirPlayReceiver(
 
         scope.launch {
             try {
-                mdnsService?.restart(displayName.ifBlank { null })
+                synchronized(this@AirPlayReceiver) {
+                    if (!stopping) mdnsService?.restart(displayName.ifBlank { null })
+                }
             } catch (e: Exception) {
                 Logger.e("Failed to restart mDNS after streaming", e)
             }
@@ -432,6 +455,7 @@ class AirPlayReceiver(
      * channel (macOS connects to it), and switch the UI to the streaming surface.
      * @return the event channel's TCP port.
      */
+    @Synchronized
     private fun startMirrorKeys(
         aesKey: ByteArray,
         ecdhSecret: ByteArray,
@@ -439,6 +463,7 @@ class AirPlayReceiver(
         remoteAddress: java.net.InetAddress,
         senderTimingPort: Int,
     ): Pair<Int, Int> {
+        if (stopping) return 0 to 0
         mirrorAesKey = aesKey
         mirrorEcdhSecret = ecdhSecret
         mirrorAesIv = aesIv
@@ -473,7 +498,10 @@ class AirPlayReceiver(
      * Mirror SETUP msg 2: start the data-stream server for the requested stream.
      * @return the data server's TCP port (macOS connects here to send H.264).
      */
+    @Synchronized
     private fun startMirrorStream(streamConnectionId: Long): Int {
+        if (stopping || rtspHandler?.hasActiveSession != true) return 0
+        lifecycle.markMirroring()
         val aesKey = mirrorAesKey ?: run { Logger.e("mirror stream start before keys set"); return 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0
         mirrorServer?.stop()
@@ -484,7 +512,9 @@ class AirPlayReceiver(
     }
 
     /** Mirror SETUP audio stream (type 96): start the AAC-ELD / AAC-LC / ALAC audio server. @return (dataPort, controlPort). */
+    @Synchronized
     private fun startMirrorAudio(sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int): Pair<Int, Int> {
+        if (stopping) return 0 to 0
         val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 to 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
         val aesIv = mirrorAesIv ?: return 0 to 0
@@ -497,6 +527,7 @@ class AirPlayReceiver(
     }
 
     /** Stops ONLY the mirror audio stream (macOS dynamic-stream TEARDOWN) — video keeps running. */
+    @Synchronized
     private fun stopMirrorAudio() {
         audioServer?.stop()
         audioServer = null
@@ -507,6 +538,7 @@ class AirPlayReceiver(
     }
 
     /** Stops ONLY the mirror video stream (macOS dynamic-stream TEARDOWN) — audio keeps playing. */
+    @Synchronized
     private fun stopMirrorVideo() {
         mirrorServer?.stop()
         mirrorServer = null
@@ -519,7 +551,9 @@ class AirPlayReceiver(
      * AirPlay video URL mode (non-mirroring): show the streaming surface and hand the URL to
      * [AirPlayVideoPlayer], which fetches + plays it via MediaPlayer onto the same Surface.
      */
+    @Synchronized
     private fun startUrlVideo(url: String, startFraction: Double, startSeconds: Double? = null) {
+        if (stopping) return
         val mirror = mirrorServer
         if (mirror != null) {
             // iOS hands a full-screen video off from a running mirror (e.g. Chrome/Safari native
@@ -559,6 +593,7 @@ class AirPlayReceiver(
      * handed off from a still-running screen mirror, go back to mirroring instead of ending the
      * whole session (previously this tore the mirror down → black TV after leaving full screen).
      */
+    @Synchronized
     private fun stopUrlVideo() {
         val player = urlVideoPlayer ?: return      // already stopped (failure + a later /stop)
         player.release()
@@ -578,7 +613,9 @@ class AirPlayReceiver(
     }
 
     /** Starts the AirPlay 2 buffered audio-only stream (type 103, Apple Music → TV); returns its TCP port. */
+    @Synchronized
     private fun startBufferedAudio(): Int {
+        if (stopping) return 0
         bufferedAudioServer?.stop()
         val server = BufferedAudioServer().also { bufferedAudioServer = it; it.start(scope) }
         audioPlaying = true   // buffered audio (type 103) is always audio-only
@@ -588,6 +625,7 @@ class AirPlayReceiver(
     }
 
     /** Stops the buffered audio-only stream (type 103 TEARDOWN). */
+    @Synchronized
     private fun stopBufferedAudio() {
         bufferedAudioServer?.stop()
         bufferedAudioServer = null
@@ -598,21 +636,23 @@ class AirPlayReceiver(
     }
 
     /** Clears the video NAL callback, closes the audio socket, and releases media components. */
+    @Synchronized
     private fun releaseMediaComponents(keepUrlVideo: Boolean = false) {
         rtspHandler?.onVideoNalUnit = null
         try { audioSocket?.close() } catch (e: Exception) { /* non-fatal */ }
         audioSocket = null
-        mirrorServer?.stop()
+        runCatching { mirrorServer?.stop() }.onFailure { Logger.e("Mirror release failed", it) }
         mirrorServer = null
-        audioServer?.stop()
+        runCatching { audioServer?.stop() }.onFailure { Logger.e("Audio server release failed", it) }
         audioServer = null
-        bufferedAudioServer?.stop()
+        runCatching { bufferedAudioServer?.stop() }.onFailure { Logger.e("Buffered audio release failed", it) }
         bufferedAudioServer = null
         if (!keepUrlVideo) {
-            urlVideoPlayer?.release()
+            val urlPlayer = urlVideoPlayer
             urlVideoPlayer = null
+            runCatching { urlPlayer?.release() }.onFailure { Logger.e("URL video release failed", it) }
         }
-        ntpClient?.stop()
+        runCatching { ntpClient?.stop() }
         ntpClient = null
         try { eventClientSocket?.close() } catch (e: Exception) { /* non-fatal */ }
         eventClientSocket = null
@@ -627,9 +667,9 @@ class AirPlayReceiver(
         mirrorAesKey = null
         mirrorEcdhSecret = null
         mirrorAesIv = null
-        videoDecoder?.release()
+        runCatching { videoDecoder?.release() }
         videoDecoder = null
-        audioPlayer?.release()
+        runCatching { audioPlayer?.release() }
         audioPlayer = null
         // Session fully torn down — clear now-playing so the UI leaves the audio card.
         audioPlaying = false

@@ -123,7 +123,7 @@ class WifiDirectManager(
     }
 
     /** 撤销一切：discovery、本地服务、P2P 组、接收器、channel。幂等，不抛异常。 */
-    suspend fun close() {
+    suspend fun close(): Boolean {
         cancelDiscoveryRestart()
         generation++                       // 先让所有迟到的回调失效
         receiver?.let { runCatching { context.unregisterReceiver(it) } }
@@ -131,11 +131,12 @@ class WifiDirectManager(
 
         val ch = channel
         val p2p = manager
+        var ok = true
         if (ch != null && p2p != null) {
-            runCatching { action(3_000L) { p2p.stopPeerDiscovery(ch, it) } }
-            runCatching { action(3_000L) { p2p.clearLocalServices(ch, it) } }
-            runCatching { action(5_000L) { p2p.removeGroup(ch, it) } }
-            if (Build.VERSION.SDK_INT >= 27) runCatching { ch.close() }
+            ok = cleanupChannel(p2p, ch)
+            if (Build.VERSION.SDK_INT >= 27 && runCatching { ch.close() }.isFailure) ok = false
+        } else if (isWfdConfigured || MiracastModeStore.isFrameworkIeInjected(context)) {
+            ok = false
         }
         channel = null
         isWfdConfigured = false
@@ -143,6 +144,7 @@ class WifiDirectManager(
         connectAttemptCount.clear()
         discoveryRetryCount = 0
         Timber.i("Wi-Fi Direct closed")
+        return ok
     }
 
     /** channel reinit 后重置 discovery 重试计数，使新一轮计数从 0 开始。 */
@@ -155,21 +157,57 @@ class WifiDirectManager(
      * 进程崩溃后 P2P 组 / 本地服务 / discovery 可能还留在系统里，而我们手里已经没有 channel 了，
      * 所以这里临时 initialize 一个 channel，把能撤的全撤掉。幂等，不抛异常。
      */
-    suspend fun purge() {
-        if (channel != null) { close(); return }
-        val p2p = manager ?: return
-        try {
-            val ch = p2p.initialize(context, Looper.getMainLooper(), null) ?: return
-            runCatching { action(3_000L) { p2p.stopPeerDiscovery(ch, it) } }
-            runCatching { action(3_000L) { p2p.clearLocalServices(ch, it) } }
-            runCatching { action(5_000L) { p2p.removeGroup(ch, it) } }
-            if (Build.VERSION.SDK_INT >= 27) runCatching { ch.close() }
+    suspend fun purge(): Boolean {
+        if (channel != null) return close()
+        val p2p = manager ?: return !MiracastModeStore.isFrameworkIeInjected(context)
+        return try {
+            val ch = p2p.initialize(context, Looper.getMainLooper(), null) ?: return false
+            var ok = cleanupChannel(p2p, ch)
+            if (Build.VERSION.SDK_INT >= 27 && runCatching { ch.close() }.isFailure) ok = false
             Timber.i("Wi-Fi Direct purged")
+            ok
         } catch (e: SecurityException) {
             Timber.w("purge skipped, permission missing")
+            false
         } catch (e: Exception) {
             Timber.w(e, "purge failed")
+            false
         }
+    }
+
+    private suspend fun cleanupChannel(p2p: WifiP2pManager, ch: WifiP2pManager.Channel): Boolean {
+        val report = CleanupReport()
+        if (isWfdConfigured || MiracastModeStore.isFrameworkIeInjected(context)) {
+            report.attempt("framework WFD IE") {
+                val cls = Class.forName("android.net.wifi.p2p.WifiP2pWfdInfo")
+                val info = cls.getDeclaredConstructor().newInstance()
+                invokeReflect(info, cls, false, "setEnabled", "setWfdEnabled")
+                val method = WifiP2pManager::class.java.getMethod(
+                    "setWFDInfo", WifiP2pManager.Channel::class.java, cls, WifiP2pManager.ActionListener::class.java
+                )
+                val ok = action { method.invoke(p2p, ch, info, it) } == ACTION_OK
+                if (ok) MiracastModeStore.setFrameworkIeInjected(context, false)
+                ok
+            }
+        }
+        report.attempt("cancel connect") { action(3_000L) { p2p.cancelConnect(ch, it) } == ACTION_OK }
+        report.attempt("discovery") { action(3_000L) { p2p.stopPeerDiscovery(ch, it) } == ACTION_OK }
+        report.attempt("local services") { action(3_000L) { p2p.clearLocalServices(ch, it) } == ACTION_OK }
+        report.attempt("group") {
+            action(5_000L) { p2p.removeGroup(ch, it) }
+            val absent = withTimeoutOrNull(3_000L) {
+                suspendCancellableCoroutine<Boolean> { cont ->
+                    try {
+                        p2p.requestGroupInfo(ch) { group -> if (cont.isActive) cont.resume(group == null) }
+                    } catch (_: SecurityException) {
+                        if (cont.isActive) cont.resume(false)
+                    }
+                }
+            } == true
+            absent
+        }
+        if (!report.clean) Timber.w("P2P cleanup incomplete: ${report.failures}")
+        return report.clean
     }
 
     // ---------------------------------------------------------------- 原子操作
@@ -243,6 +281,7 @@ class WifiDirectManager(
             val method = WifiP2pManager::class.java.getMethod(
                 "setWFDInfo", WifiP2pManager.Channel::class.java, cls, WifiP2pManager.ActionListener::class.java
             )
+            MiracastModeStore.setFrameworkIeInjected(context, true)
             val ok = action { method.invoke(p2p, ch, info, it) } == ACTION_OK
             isWfdConfigured = ok
             ok

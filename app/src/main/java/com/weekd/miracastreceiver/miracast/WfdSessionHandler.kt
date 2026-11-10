@@ -79,8 +79,8 @@ class WfdSessionHandler(
             Timber.e(e, "Error in WFD session")
         } finally {
             Timber.i("WFD session ended")
-            onStreamStop?.invoke()
             close()
+            onStreamStop?.invoke()
         }
     }
 
@@ -176,7 +176,6 @@ class WfdSessionHandler(
             }
             "TEARDOWN" -> {
                 sendOk(cseq)
-                onStreamStop?.invoke()
                 close()
             }
             else -> sendOk(cseq)
@@ -272,6 +271,7 @@ class WfdSessionHandler(
             .find(msg)?.groupValues?.get(1)?.trim()
 
     private fun startPlayerActivity() {
+        if (socket.isClosed) return
         val intent = Intent(context, com.weekd.miracastreceiver.ui.PlayerActivity::class.java).apply {
             putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_SOURCE_TYPE, "MIRACAST")
             putExtra(com.weekd.miracastreceiver.ui.PlayerActivity.EXTRA_RTP_PORT, rtpPort)

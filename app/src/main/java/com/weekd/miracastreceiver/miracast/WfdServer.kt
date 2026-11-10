@@ -32,6 +32,10 @@ class WfdServer(
     private val rtpPort: Int = 19000
 ) {
     private var scope: CoroutineScope? = null
+    private val sessionLock = Any()
+    private val sockets = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Socket, Boolean>())
+    private var stoppedJob: Job? = null
+    private var stoppedReceiver: RtpReceiver? = null
 
     @Volatile
     private var isRunning = false
@@ -160,11 +164,16 @@ class WfdServer(
 
     private fun tryConnect(ip: String): Socket? {
         val s = Socket()
+        synchronized(sessionLock) {
+            if (!isRunning) { s.close(); return null }
+            sockets.add(s)
+        }
         return try {
             s.connect(InetSocketAddress(ip, port), CONNECT_TIMEOUT_MS)
             s
         } catch (e: Exception) {
             runCatching { s.close() }
+            sockets.remove(s)
             null
         }
     }
@@ -188,6 +197,9 @@ class WfdServer(
 
     /** 在已连接的 socket 上跑完整个会话；结束后返回，外层循环继续等待下一次投屏。 */
     private fun runSession(socket: Socket) {
+        var streamStarted = false
+        val (receiver, handler) = synchronized(sessionLock) {
+        if (!isRunning) { socket.close(); sockets.remove(socket); return }
         val sourceIp = socket.inetAddress.hostAddress ?: "unknown"
         onConnectionRequested?.invoke("Windows PC", sourceIp)
 
@@ -200,22 +212,24 @@ class WfdServer(
         }
         rtpReceiver = receiver
 
-        var streamStarted = false
         closedByUs = false
-        val handler = WfdSessionHandler(context, socket, rtpPort).apply {
+        val handler = try { WfdSessionHandler(context, socket, rtpPort).apply {
             onSessionEstablished = { onConnectionEstablished?.invoke(it) }
             onStreamStart = {
                 streamStarted = true
                 onStreamStarted?.invoke(it)
             }
             onStreamStop = { onStreamStopped?.invoke() }
-        }
+        } } catch (e: Exception) { receiver.stop(); throw e }
         sessionHandler = handler
+        receiver to handler
+        }
 
         try {
             handler.handleSession()          // 阻塞直到会话结束
         } finally {
             receiver.stop()
+            sockets.remove(socket)
             rtpReceiver = null
             sessionHandler = null
             // 只有在没收到 PLAY 且不是我们主动关闭时，才认为是握手失败（"通道占用"）。
@@ -240,17 +254,31 @@ class WfdServer(
     }
 
     fun stop() {
+        synchronized(sessionLock) {
         isRunning = false
         closedByUs = true
         // Send TEARDOWN before closing the socket so Source can clean up its WFD state machine.
         // disconnectSender() is synchronous on the caller thread here (no scope needed).
         runCatching { sessionHandler?.disconnectSender() }
         sessionHandler = null
+        sockets.forEach { runCatching { it.close() } }
+        sockets.clear()
+        if (rtpReceiver != null) stoppedReceiver = rtpReceiver
         rtpReceiver?.stop()
         rtpReceiver = null
+        if (scope != null) stoppedJob = scope?.coroutineContext?.get(Job)
         scope?.cancel()
         scope = null
         Timber.i("WFD session starter stopped")
+        }
+    }
+
+    suspend fun stopAndAwait(): Boolean {
+        stop()
+        return withTimeoutOrNull(5_000L) {
+            stoppedJob?.join()
+            stoppedReceiver?.awaitStopped() ?: true
+        } ?: false
     }
 
     fun isRunning(): Boolean = isRunning

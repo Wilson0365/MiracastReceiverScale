@@ -46,7 +46,7 @@ class MiracastAudioPlayer {
     // 以下字段只在播放线程上访问
     private var codec: MediaCodec? = null
     private var codecConfig = 0                  // 当前解码器对应的 ASC，变了就重建
-    private var audioTrack: AudioTrack? = null
+    @Volatile private var audioTrack: AudioTrack? = null
     private var trackSampleRate = 0
     private var trackChannels = 0
     private val adts = ByteArrayOutputStream(16 * 1024)
@@ -93,10 +93,15 @@ class MiracastAudioPlayer {
     fun release() {
         released = true
         running = false
+        // AudioTrack.stop unblocks a native blocking write; MediaCodec stays owned by its worker.
+        runCatching { audioTrack?.pause() }
+        runCatching { audioTrack?.flush() }
+        runCatching { audioTrack?.stop() }
         thread?.interrupt()
-        thread = null
         queue.clear()
     }
+
+    fun awaitStopped(timeoutMs: Long = 5_000L): Boolean = awaitAudioThread(thread, timeoutMs)
 
     private fun runPlayback() {
         Timber.i("Miracast audio: playback thread started")
@@ -316,6 +321,7 @@ class MiracastAudioPlayer {
 
     /** 阻塞写入，由 AudioTrack 的消耗速度给播放线程定速。 */
     private fun writePcm(pcm: ByteArray, length: Int) {
+        if (!running) return
         val track = audioTrack ?: return
         if (firstPcm) {
             firstPcm = false
@@ -342,5 +348,17 @@ class MiracastAudioPlayer {
         audioTrack = null
         trackSampleRate = 0
         trackChannels = 0
+    }
+}
+
+internal fun awaitAudioThread(worker: Thread?, timeoutMs: Long): Boolean {
+    if (worker == null) return true
+    if (worker === Thread.currentThread()) return false
+    return try {
+        worker.join(timeoutMs)
+        !worker.isAlive
+    } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        false
     }
 }

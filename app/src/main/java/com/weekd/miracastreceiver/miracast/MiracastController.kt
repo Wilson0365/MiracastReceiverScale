@@ -97,6 +97,7 @@ class MiracastController(
     private val ctx = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val state = MiracastRuntime.state
+    @Volatile private var stopping = false
 
     private var observer: ContentObserver? = null
     private var driftJob: Job? = null
@@ -120,8 +121,10 @@ class MiracastController(
      * - 带"强制清理"标记（用户手动操作过）：绕过所有"已对齐"捷径，先深度清理再按意图重做。
      */
     fun reconcile() {
+        if (stopping) return
         scope.launch {
             mutex.withLock {
+                if (stopping) return@withLock
                 val force = MiracastModeStore.takeCleanPending(ctx)
                 converge(MiracastModeStore.get(ctx), force)
             }
@@ -135,17 +138,32 @@ class MiracastController(
 
     /** 服务被真正销毁时调用。撤销运行时资源并还给电视；用户意图不变。 */
     fun shutdown() {
-        if (MiracastRuntime.controller === this) MiracastRuntime.controller = null
+        if (stopping) return
+        stopping = true
+        scope.launch { shutdownAndAwait() }
+    }
+
+    /** Safe even when a new service instance is waiting on the same process-wide mutex. */
+    suspend fun shutdownAndAwait(): Boolean = withContext(NonCancellable) {
+        stopping = true
+        scope.cancel()
+        if (MiracastRuntime.controller === this@MiracastController) MiracastRuntime.controller = null
         p2p.onGroupDropped = null
+        p2p.onGroupFormed = null
         p2p.onP2pEnabledChanged = null
-        scope.launch {
-            mutex.withLock {
-                val ok = enterSystem()
+        p2p.onDiscoveryHardFail = null
+        wfd.onSessionFailed = null
+        val ok = mutex.withLock {
+                val owned = p2p.isOpen || MiracastModeStore.isSessionOpen(ctx) ||
+                    MiracastModeStore.isRootIeInjected(ctx) || MiracastModeStore.isFrameworkIeInjected(ctx) ||
+                    state.value is MiracastState.AppActive || classifyResidue() == Residue.OURS
+                val ok = if (owned) enterSystem(deep = !p2p.isOpen) else true
                 state.value = if (ok) MiracastState.SystemOwned
                 else MiracastState.Failed(MiracastError.CANNOT_WRITE_SETTING)
-            }
-            scope.cancel()
+                ok
         }
+        scope.cancel()
+        ok
     }
 
     // ------------------------------------------------------------------ 对齐
@@ -222,7 +240,8 @@ class MiracastController(
      *  - 都没有（比如应用数据被清）而开关是 1 → 无法判断。
      */
     private fun classifyResidue(): Residue {
-        if (MiracastModeStore.isSessionOpen(ctx)) return Residue.OURS
+        if (MiracastModeStore.isSessionOpen(ctx) || MiracastModeStore.isRootIeInjected(ctx) ||
+            MiracastModeStore.isFrameworkIeInjected(ctx)) return Residue.OURS
         val g = WifiDisplaySetting.current(ctx) ?: return Residue.NONE
         val w = MiracastModeStore.lastWritten(ctx)
         return when {
@@ -235,6 +254,7 @@ class MiracastController(
     // ------------------------------------------------------------------ SYSTEM -> APP
 
     private suspend fun enterApp() {
+        if (stopping) return
         state.value = MiracastState.Switching(MiracastMode.APP)
         try {
             withTimeout(ENTER_APP_TIMEOUT_MS) {
@@ -320,25 +340,36 @@ class MiracastController(
      * @return 系统开关是否确实回到了"系统负责"。
      */
     private suspend fun enterSystem(deep: Boolean = false): Boolean = withContext(NonCancellable) {
+        withContext(Dispatchers.IO) { MiracastModeStore.setSessionOpen(ctx, true) }
         state.value = MiracastState.Switching(MiracastMode.SYSTEM)
         stopDriftWatch()
         healthJob?.cancel()
         rebuildJob?.cancel()
-        runCatching { wfd.disconnectSender() }
-        runCatching { wfd.stop() }
-        runCatching { p2p.close() }
-        if (deep) runCatching { p2p.purge() }
+        val report = CleanupReport()
+        report.attempt("WFD") { withContext(Dispatchers.IO) { wfd.stopAndAwait() } }
+        if (MiracastModeStore.isRootIeInjected(ctx)) {
+            report.attempt("root WFD IE") {
+                withContext(Dispatchers.IO) {
+                    val ok = WfdRootHelper.stopAdvertising(ctx)
+                    if (ok) MiracastModeStore.setRootIeInjected(ctx, false)
+                    ok
+                }
+            }
+        }
+        report.attempt("P2P") { if (deep) p2p.purge() else p2p.close() }
         withContext(Dispatchers.IO) {
-            val ok = WifiDisplaySetting.write(ctx, false)
+            report.attempt("wifi_display_on") { WifiDisplaySetting.write(ctx, false) }
             // 只有确认系统开关已还回去，才算会话干净结束；否则保持"脏"，下次启动继续尝试
-            if (ok) MiracastModeStore.setSessionOpen(ctx, false)
-            ok
+            if (report.clean) MiracastModeStore.setSessionOpen(ctx, false)
+            else Timber.w("Miracast cleanup incomplete: ${report.failures}")
+            report.clean
         }
     }
 
     // ------------------------------------------------------------------ APP 模式下的自愈
 
     private fun scheduleRebuild() {
+        if (stopping) return
         if (rebuildJob?.isActive == true) return
         rebuildJob = scope.launch {
             repeat(REBUILD_ATTEMPTS) {
@@ -370,6 +401,7 @@ class MiracastController(
      */
     private fun scheduleP2pReset() {
         scope.launch {
+            if (stopping || state.value !is MiracastState.AppActive) return@launch
             Timber.w("Miracast: RTSP handshake failed, resetting P2P group to unblock sender")
             p2p.disconnectSender()
             // disconnectSender 是异步的；P2P 组断开后系统广播 CONNECTION_CHANGED(groupFormed=false)
@@ -418,6 +450,7 @@ class MiracastController(
 
     /** 必须在锁内调用。非 APP 状态直接视为"没事可做"（丢弃过期回调）。 */
     private suspend fun tryRebuild(): Boolean {
+        if (stopping) return true
         val cur = state.value as? MiracastState.AppActive ?: return true
         return try {
             var ie = cur.wfdIeAdvertised
