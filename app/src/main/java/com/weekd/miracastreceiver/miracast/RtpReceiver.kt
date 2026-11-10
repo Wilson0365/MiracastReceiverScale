@@ -75,13 +75,14 @@ class RtpReceiver(
         var active: RtpReceiver? = null
     }
 
-    fun start() {
+    @Synchronized
+    fun start(): Boolean {
         if (isRunning) {
             Timber.w("RTP Receiver already running")
-            return
+            return true
         }
 
-        active = this
+        if (!scope.isActive) return false
 
         // Bind the socket synchronously so stop() can always close it, even if called
         // before the receive coroutine starts running.
@@ -92,9 +93,10 @@ class RtpReceiver(
         } catch (e: Exception) {
             Timber.e(e, "Failed to bind UDP $port for RTP")
             onError?.invoke("RTP 接收启动失败: ${e.message}")
-            return
+            return false
         }
         socket = sock
+        active = this
         isRunning = true
         Timber.i("RTP Receiver listening on UDP $port (expecting MPEG-2 TS, PT=33), recvBuf=${sock.receiveBufferSize}")
 
@@ -105,7 +107,8 @@ class RtpReceiver(
                 val buffer = ByteArray(65536)
                 val packet = DatagramPacket(buffer, buffer.size)
                 var loggedFirst = false
-                var expectedSeq = -1
+                val sequence = RtpSequenceTracker()
+                var queueDrops = 0L
 
                 while (isRunning) {
                     try {
@@ -129,19 +132,20 @@ class RtpReceiver(
                         // RTP 序号跳变 = 网络丢包，残缺的帧不能喂给解码器
                         val seq = ((packet.data[2].toInt() and 0xFF) shl 8) or
                             (packet.data[3].toInt() and 0xFF)
-                        if (expectedSeq >= 0 && seq != expectedSeq) {
-                            val lost = (seq - expectedSeq + 0x10000) and 0xFFFF
-                            packetsLost += lost
-                            Timber.w("RTP: lost $lost packets (seq $expectedSeq → $seq)")
+                        val priorLost = sequence.lost
+                        if (!sequence.accept(seq)) continue
+                        packetsLost = sequence.lost + queueDrops
+                        if (sequence.lost > priorLost) {
+                            Timber.w("RTP: forward gap, lost=" + sequence.lost)
                             renderer.onDiscontinuity()
                             audioPlayer.onDiscontinuity()
                         }
-                        expectedSeq = (seq + 1) and 0xFFFF
 
                         // 接收线程只入队，解复用和解码在另一条线程上做
                         val payload = packet.data.copyOfRange(payloadOffset, packet.length)
                         if (!payloadQueue.offer(payload)) {
-                            payloadQueue.poll()
+                            if (payloadQueue.poll() != null) queueDrops++
+                            packetsLost = sequence.lost + queueDrops
                             payloadQueue.offer(payload)
                             renderer.onDiscontinuity()
                             audioPlayer.onDiscontinuity()
@@ -161,6 +165,7 @@ class RtpReceiver(
                 isRunning = false
             }
         }
+        return true
     }
 
     /** 解码线程：从队列取 TS 负载做解复用，解出的访问单元由 renderer 送进 MediaCodec。 */
@@ -202,6 +207,7 @@ class RtpReceiver(
         return if (headerLength < length) headerLength else -1
     }
 
+    @Synchronized
     fun stop() {
         isRunning = false
         scope.cancel()

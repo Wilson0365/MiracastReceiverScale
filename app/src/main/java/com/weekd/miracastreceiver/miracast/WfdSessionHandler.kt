@@ -39,7 +39,7 @@ class WfdSessionHandler(
     private var outCseq = 0                  // 我们主动发起的请求用的 CSeq
     private var sessionId = ""
     private var presentationUrl = ""
-    private var playRequested = false
+    private val pending = java.util.concurrent.ConcurrentHashMap<Int, String>()
 
     var onSessionEstablished: ((sessionId: String) -> Unit)? = null
     var onStreamStart: ((rtpPort: Int) -> Unit)? = null
@@ -123,6 +123,7 @@ class WfdSessionHandler(
         return msg
     }
 
+    @Synchronized
     private fun send(msg: String) {
         Timber.d("WFD << ${msg.lineSequence().first()}")
         Timber.v("WFD << full:\n$msg")
@@ -184,30 +185,42 @@ class WfdSessionHandler(
 
     // ─── 处理 Source 对我们请求的响应 ────────────────────────────────────────
     private fun handleResponse(msg: String) {
-        val statusCode = msg.substringAfter("RTSP/1.0 ").substringBefore(' ').toIntOrNull() ?: 0
-        if (statusCode != 200) {
-            Timber.w("WFD: source rejected our request with status $statusCode, closing session")
+        val cseq = header(msg, "CSeq")?.toIntOrNull() ?: return
+        val method = pending.remove(cseq) ?: return
+        val status = msg.lineSequence().first().split(' ').getOrNull(1)?.toIntOrNull()
+        if (status != 200) {
+            Timber.w("WFD: request rejected, closing media session")
             close()
             return
         }
-        val session = header(msg, "Session")?.substringBefore(';')
-        if (!session.isNullOrBlank() && sessionId.isEmpty()) {
-            sessionId = session
-            Timber.i("WFD: session id = $sessionId")
-            onSessionEstablished?.invoke(sessionId)
-            sendPlay()                                           // M7
-        } else if (playRequested) {
-            Timber.i("WFD: PLAY acknowledged, RTP should start on $rtpPort")
-            onStreamStart?.invoke(rtpPort)
-            startPlayerActivity()
-            playRequested = false
+        when (method) {
+            "SETUP" -> {
+                val id = header(msg, "Session")?.substringBefore(';')
+                if (id.isNullOrBlank()) { close(); return }
+                sessionId = id
+                onSessionEstablished?.invoke(id)
+                sendPlay()
+            }
+            "PLAY" -> {
+                val id = header(msg, "Session")?.substringBefore(';')
+                if (id != null && id != sessionId) { close(); return }
+                Timber.i("WFD: matching PLAY acknowledged")
+                onStreamStart?.invoke(rtpPort)
+                startPlayerActivity()
+            }
         }
+    }
+
+    private fun nextRequest(method: String): Int {
+        val seq = ++outCseq
+        pending[seq] = method
+        return seq
     }
 
     // ─── 我们主动发起的请求 ──────────────────────────────────────────────────
     private fun sendOptions() = send(
         "OPTIONS * RTSP/1.0\r\n" +
-            "CSeq: ${++outCseq}\r\n" +
+            "CSeq: ${nextRequest("OPTIONS")}\r\n" +
             "Require: org.wfa.wfd1.0\r\n\r\n"
     )
 
@@ -217,16 +230,15 @@ class WfdSessionHandler(
         }
         send(
             "SETUP $presentationUrl RTSP/1.0\r\n" +
-                "CSeq: ${++outCseq}\r\n" +
+                "CSeq: ${nextRequest("SETUP")}\r\n" +
                 "Transport: RTP/AVP/UDP;unicast;client_port=$rtpPort\r\n\r\n"
         )
     }
 
     private fun sendPlay() {
-        playRequested = true
         send(
             "PLAY $presentationUrl RTSP/1.0\r\n" +
-                "CSeq: ${++outCseq}\r\n" +
+                "CSeq: ${nextRequest("PLAY")}\r\n" +
                 "Session: $sessionId\r\n\r\n"
         )
     }

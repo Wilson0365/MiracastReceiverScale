@@ -120,7 +120,7 @@ class WfdServer(
         // p2p0 接口在 P2P-GROUP-FORMATION-SUCCESS 后还需要几秒才拿到 DHCP 地址，
         // 轮询等它就绪，最多等 15 秒，再开始扫描。
         val subnetDeadline = android.os.SystemClock.elapsedRealtime() + 15_000L
-        while (isRunning && p2pSubnetPrefix() == null) {
+        while (isRunning && p2pSubnets().isEmpty()) {
             if (android.os.SystemClock.elapsedRealtime() >= subnetDeadline) {
                 Timber.w("WFD: dialSource timed out waiting for p2p subnet")
                 return@coroutineScope null
@@ -141,20 +141,15 @@ class WfdServer(
             }
         }
 
-        val prefix = p2pSubnetPrefix() ?: return@coroutineScope null
-        Timber.d("WFD: scanning subnet ${prefix}2-254 for source on port $port")
-
-        for (chunkStart in 2..254 step SCAN_CHUNK) {
+        val candidates = p2pSubnets().flatMap { it.candidates() }.distinct()
+        Timber.d("WFD: scanning " + candidates.size + " P2P addresses")
+        for (chunk in candidates.chunked(SCAN_CHUNK)) {
             if (!isRunning) return@coroutineScope null
-            val range = chunkStart until minOf(chunkStart + SCAN_CHUNK, 255)
-            val connected = range.map { host ->
-                async { tryConnect("$prefix$host") }
-            }.awaitAll().filterNotNull()
-
+            val connected = chunk.map { ip -> async { tryConnect(ip) } }.awaitAll().filterNotNull()
             if (connected.isNotEmpty()) {
                 val session = connected.first()
-                connected.drop(1).forEach { runCatching { it.close() } }
-                Timber.i("WFD: connected to source at ${session.inetAddress.hostAddress}:$port")
+                connected.drop(1).forEach { runCatching { it.close() }; sockets.remove(it) }
+                Timber.i("WFD: connected to source " + session.inetAddress.hostAddress)
                 return@coroutineScope session
             }
         }
@@ -182,17 +177,15 @@ class WfdServer(
      * 取本机 P2P 接口的 /24 前缀（通常是 "192.168.49."）。
      * 组主地址本身要排除掉，剩下的就是 Source 可能拿到的地址。
      */
-    private fun p2pSubnetPrefix(): String? = try {
+    private fun p2pSubnets(): List<P2pSubnet> = try {
         NetworkInterface.getNetworkInterfaces().toList()
-            .firstOrNull { it.name.startsWith("p2p") && it.isUp }
-            ?.inetAddresses?.toList()
-            ?.firstOrNull { !it.isLoopbackAddress && it.address.size == 4 }
-            ?.hostAddress
-            ?.substringBeforeLast('.')
-            ?.plus(".")
+            .filter { it.name.startsWith("p2p") && it.isUp }
+            .flatMap { it.interfaceAddresses }
+            .filter { !it.address.isLoopbackAddress && it.address.address.size == 4 }
+            .map { P2pSubnet(it.address.hostAddress!!, it.networkPrefixLength.toInt()) }
     } catch (e: Exception) {
-        Timber.e(e, "Failed to resolve P2P subnet")
-        null
+        Timber.w(e, "WFD: cannot read system P2P interfaces")
+        emptyList()
     }
 
     /** 在已连接的 socket 上跑完整个会话；结束后返回，外层循环继续等待下一次投屏。 */
@@ -208,7 +201,13 @@ class WfdServer(
         // 播放页尚未创建时返回 null，解码器会等它就绪。
         val receiver = RtpReceiver(rtpPort, { com.weekd.miracastreceiver.ui.PlayerActivity.mirrorSurface }).apply {
             onError = { Timber.e("Miracast RTP error: $it") }
-            start()
+        }
+        if (!receiver.start()) {
+            receiver.stop()
+            socket.close()
+            sockets.remove(socket)
+            onSessionFailed?.invoke()
+            return
         }
         rtpReceiver = receiver
 

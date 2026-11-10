@@ -5,3 +5,4 @@ Pre-flight: Task 1 consumes existing WfdServer signatures; Task 2 changes start(
 Decision: no legacy removeGroup attempt; no group identity can prove exclusive app ownership. Firmware setting value 1 is provisional until OPPO validation; preserve prior value only when still owned.
 
 Task 1: lifecycle RED (missing coordinator), GREEN full testDebugUnitTest (BUILD SUCCESSFUL, 47s). Clean release baseline passed (36s). Active P2P implementation removed; system observer, settings lease and idempotent media lifecycle integrated.
+Task 2: RED missing prefix/sequence classes and UDP start Boolean contract; GREEN full testDebugUnitTest (BUILD SUCCESSFUL, 48s), including real UDP port conflict and loopback RTSP response matching.
