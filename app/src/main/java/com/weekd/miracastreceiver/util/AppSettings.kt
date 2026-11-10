@@ -19,7 +19,6 @@ object AppSettings {
     private const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
     private const val KEY_LANGUAGE = "language"
     private const val KEY_RETURN_TO_APP_AFTER_CAST = "return_to_app_after_cast"
-    private const val KEY_AUTO_CONNECT_ANDROID = "auto_connect_android"
 
     /**
      * 是否开机自动启动接收服务。
@@ -53,17 +52,6 @@ object AppSettings {
 
     fun setReturnToAppAfterCast(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_RETURN_TO_APP_AFTER_CAST, enabled).apply()
-    }
-
-    /** 是否在 App 接管模式下自动发现并连接安卓手机（OPPO/vivo/小米等）。默认开启。 */
-    fun isAutoConnectAndroid(context: Context): Boolean {
-        // Upgrade old installations before boot-start can use the retired disabled strategy.
-        if (!prefs(context).getBoolean(KEY_AUTO_CONNECT_ANDROID, true)) setAutoConnectAndroid(context, true)
-        return true
-    }
-
-    fun setAutoConnectAndroid(context: Context, enabled: Boolean) {
-        prefs(context).edit().putBoolean(KEY_AUTO_CONNECT_ANDROID, enabled).apply()
     }
 
     private fun prefs(context: Context) =

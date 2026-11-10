@@ -50,7 +50,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchAutoStart: SwitchCompat
     private lateinit var switchReturnToApp: SwitchCompat
     private lateinit var switchMiracastTakeover: SwitchCompat
-    private lateinit var switchAutoConnectAndroid: SwitchCompat
     private lateinit var tvLanguageValue: TextView
 
     /** 定位权限弹窗还在时不叠加悬浮窗权限提示，等它有结果再说 */
@@ -193,7 +192,6 @@ class MainActivity : AppCompatActivity() {
         }
         switchReturnToApp = findViewById(R.id.switch_return_to_app)
         switchMiracastTakeover = findViewById(R.id.switch_miracast_takeover)
-        switchAutoConnectAndroid = findViewById(R.id.switch_auto_connect_android)
         tvLanguageValue = findViewById(R.id.tv_language_value)
 
         // 开机自启开关
@@ -225,9 +223,6 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
-        // 自动连接安卓手机改为内部策略，覆盖旧版本保存的关闭状态。
-        MiracastRuntime.setAutoConnectAndroid(this, true)
-        switchAutoConnectAndroid.isChecked = true
 
         // 界面语言
         findViewById<View>(R.id.setting_language).setOnClickListener { showLanguageDialog() }
@@ -339,6 +334,15 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             MiracastRuntime.state.collect { state ->
                 tvMiracastStatus.setText(miracastStatusRes(state))
+                switchMiracastTakeover.setOnCheckedChangeListener(null)
+                switchMiracastTakeover.isChecked = MiracastModeStore.get(this@MainActivity) == MiracastMode.APP
+                switchMiracastTakeover.isEnabled = state !is MiracastState.Switching
+                switchMiracastTakeover.setOnCheckedChangeListener { _, checked ->
+                    if (checked && !com.weekd.miracastreceiver.miracast.MiracastPermissions.granted(this@MainActivity)) {
+                        requestWifiDirectPermissions()
+                    }
+                    MiracastRuntime.requestMode(this@MainActivity, if (checked) MiracastMode.APP else MiracastMode.SYSTEM)
+                }
                 val isInitOrSwitching = state is MiracastState.Initializing ||
                     state is MiracastState.Switching
                 if (ReceiverStatus.service == ReceiverStatus.Service.RUNNING) {
@@ -353,7 +357,7 @@ class MainActivity : AppCompatActivity() {
         is MiracastState.Switching -> R.string.status_miracast_checking
         is MiracastState.SystemOwned -> R.string.status_miracast_system_active
         is MiracastState.AppActive -> if (state.groupReady) R.string.status_miracast_app_active
-            else R.string.status_miracast_checking
+            else R.string.status_miracast_waiting_p2p
         is MiracastState.Failed -> when (state.error) {
             com.weekd.miracastreceiver.miracast.MiracastError.PERMISSION_MISSING ->
                 R.string.status_miracast_permission
@@ -361,6 +365,8 @@ class MainActivity : AppCompatActivity() {
                 R.string.status_miracast_wifi_disabled
             com.weekd.miracastreceiver.miracast.MiracastError.UNSUPPORTED ->
                 R.string.status_miracast_unsupported
+            com.weekd.miracastreceiver.miracast.MiracastError.CANNOT_WRITE_SETTING ->
+                R.string.status_miracast_cannot_write
             else -> R.string.status_miracast_failed
         }
     }

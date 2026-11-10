@@ -105,11 +105,11 @@
     <string name="status_miracast_unsupported">此设备未提供 Wi-Fi Direct，无法使用 Windows / 安卓屏幕镜像。可改用 AirPlay、DLNA 或 VLC 投屏。</string>
     <string name="status_miracast_permission">Windows / 安卓屏幕镜像需要“附近的设备”或定位权限。请在系统应用设置中允许后重新打开应用。</string>
     <string name="status_miracast_wifi_disabled">Windows / 安卓屏幕镜像需要 Wi-Fi Direct。请开启 Wi-Fi 后重新打开应用，仅连接网线不足以使用此功能。</string>
-    <string name="miracast_takeover">App 接管 Miracast（Win+K 无线显示器）</string>
-    <string name="miracast_takeover_hint">开启：本电视出现在 Windows 连接（Win+K）列表中。关闭：改由系统内置 Miracast 接收器负责发现。</string>
-    <string name="auto_connect_android">自动连接安卓手机</string>
-    <string name="auto_connect_android_hint">开启后，电视主动发现并连接附近的 OPPO、vivo、小米手机（Wi-Fi Direct）。每次只连一台，连上后停止。</string>
-    <string name="status_miracast_app_active">Miracast 由本应用管理</string>
-    <string name="status_miracast_system_active">系统 Miracast 已激活</string>
-    <string name="miracast_clean_reapply">正在清理 Miracast 状态并重新应用…</string>
+    <string name="miracast_takeover">使用应用播放器接收 Miracast</string>
+    <string name="miracast_takeover_hint">开启：系统负责设备连接，本应用接收并播放画面，可调整比例。关闭：使用系统原生 Miracast。</string>
+    <string name="status_miracast_app_active">系统 P2P 已连接，等待应用播放器接收画面</string>
+    <string name="status_miracast_system_active">已选择系统原生 Miracast</string>
+    <string name="miracast_clean_reapply">正在重启应用媒体接收…</string>
+    <string name="status_miracast_waiting_p2p">等待系统连接 Miracast 设备</string>
+    <string name="status_miracast_cannot_write">无法启用系统投屏：请使用 adb 授予 WRITE_SECURE_SETTINGS 权限</string>
 </resources>

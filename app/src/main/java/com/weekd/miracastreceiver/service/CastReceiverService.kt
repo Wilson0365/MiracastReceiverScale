@@ -34,7 +34,7 @@ import com.weekd.miracastreceiver.miracast.MiracastRuntime
 import com.weekd.miracastreceiver.miracast.MiracastMode
 import com.weekd.miracastreceiver.miracast.MiracastModeStore
 import com.weekd.miracastreceiver.miracast.WfdServer
-import com.weekd.miracastreceiver.miracast.WifiDirectManager
+import com.weekd.miracastreceiver.miracast.WifiP2pObserver
 import com.weekd.miracastreceiver.util.AppLanguage
 import com.weekd.miracastreceiver.utils.NetworkUtils
 import timber.log.Timber
@@ -245,7 +245,6 @@ class CastReceiverService : Service() {
 
     private fun initMiracastController() {
         if (::miracast.isInitialized) return
-        val deviceName = DeviceInfoProvider(this).getDeviceName()
         val wfdServer = WfdServer(this, 7236).apply {
             onConnectionRequested = { clientName, clientAddress ->
                 Timber.i("Miracast connection requested: $clientName from $clientAddress")
@@ -263,10 +262,14 @@ class CastReceiverService : Service() {
                 Timber.i("Miracast stream stopped, closing player")
                 // Windows 断开（RTSP 连接关闭或 TEARDOWN）后必须主动关掉播放页，
                 // 否则手机会一直停在最后一帧画面上
-                mainHandler.post { if (!stopping && endedMirroring) beginExit() }
+                mainHandler.post {
+                    if (!stopping && endedMirroring) sendBroadcast(
+                        Intent(com.weekd.miracastreceiver.ui.PlayerActivity.ACTION_STOP).setPackage(packageName)
+                    )
+                }
             }
         }
-        val p2p = WifiDirectManager(this, deviceName)
+        val p2p = WifiP2pObserver(this)
         miracast = MiracastController(this, p2p, wfdServer)
         MiracastRuntime.controller = miracast
     }

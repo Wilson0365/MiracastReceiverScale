@@ -253,6 +253,14 @@ class WfdServer(
         Timber.i("WFD: P2P group formed, isGO=$tvIsGroupOwner goAddr=$groupOwnerAddress, triggering immediate scan")
     }
 
+    /** Lost system group: close media/probes, without changing P2P. */
+    fun onGroupDropped() {
+        groupOwnerAddress = null
+        groupFormedAtMs = 0L
+        disconnectSender()
+        sockets.forEach { runCatching { it.close() } }
+    }
+
     fun stop() {
         synchronized(sessionLock) {
         isRunning = false
