@@ -1,5 +1,11 @@
 # Miracast Scale SP2P: System P2P / App Media
 
+## 1.2.14-system-p2p photo scaling
+
+Photo scaling from original release commit `f2e3205` is synchronized into this feature branch. DLNA images now use their own drawable matrix for zoom, fill, rotation and bounded pan. The shared scale menu adds 300%, 350% and 400% and scrolls horizontally. System P2P ownership and the independent application ID remain as described below.
+
+This update publishes a 32-bit `armeabi-v7a` Release APK. Image-transform regression tests verify the geometry; the reported TV black screen still needs device validation.
+
 This side-by-side app is built on feature/system-p2p-app-media-side-by-side, copied from the original feature branch at c18d7b5. Its independent package ID lets it coexist with the original Miracast Receiver on the same TV. The earlier feature branch is preserved.
 
 Feature project based on [release/v1.2.13](https://github.com/Wilson0365/MiracastReceiverScale/tree/release/v1.2.13), implementing the final two-mode design from [takeoveroff GPTPlan](GPTPlan) and [GPTReview](GPTReview.md).
@@ -29,7 +35,7 @@ Requirements: Android SDK 36, JDK 17, CMake 3.22.1 and installed Android NDK. Co
 .\gradlew.bat testDebugUnitTest assembleDebug
 ~~~
 
-The application ID is com.weekd.miracastreceiver.systemp2p and the TV launcher name is Miracast Scale SP2P. It installs separately from com.weekd.miracastreceiver, with separate settings and permissions. VersionName is 1.2.13-system-p2p and versionCode is 20. Both apps can be installed; run only one receiving service at a time because they use the same media ports. Disable auto-start on boot in one app when testing them side by side.
+The application ID is com.weekd.miracastreceiver.systemp2p and the TV launcher name is Miracast Scale SP2P. It installs separately from com.weekd.miracastreceiver, with separate settings and permissions. VersionName is 1.2.14-system-p2p and versionCode is 21. Both apps can be installed; run only one receiving service at a time because they use the same media ports. Disable auto-start on boot in one app when testing them side by side.
 
 ## Device acceptance
 

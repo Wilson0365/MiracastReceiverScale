@@ -5,6 +5,12 @@ import org.junit.Test
 
 class ScaleManagerTest {
     private val manager = ScaleManager(1920, 1080)
+    @Test fun zoomPresetsIncludeLargerStepsThroughFourHundredPercent() {
+        val factors = ScaleMode.values().mapNotNull { it.factor }
+        for (factor in listOf(2.5f, 3f, 3.5f, 4f)) {
+            assertTrue("Missing zoom preset: $factor", factor in factors)
+        }
+    }
     @Test fun originalModeDoesNotPan() {
         manager.pan(1, false)
         manager.panHorizontal(1)

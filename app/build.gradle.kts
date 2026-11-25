@@ -19,8 +19,8 @@ android {
         applicationId = "com.weekd.miracastreceiver.systemp2p"
         minSdk = 21
         targetSdk = 36
-        versionCode = 20
-        versionName = "1.2.13-system-p2p"
+        versionCode = 21
+        versionName = "1.2.14-system-p2p"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

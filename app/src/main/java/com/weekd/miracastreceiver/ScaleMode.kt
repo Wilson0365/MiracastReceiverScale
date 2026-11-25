@@ -7,5 +7,8 @@ enum class ScaleMode(val label: String, val factor: Float?) {
     SCALE_150("150%", 1.50f),
     SCALE_175("175%", 1.75f),
     SCALE_200("200%", 2.00f),
-    SCALE_250("250%", 2.50f)
+    SCALE_250("250%", 2.50f),
+    SCALE_300("300%", 3.00f),
+    SCALE_350("350%", 3.50f),
+    SCALE_400("400%", 4.00f)
 }

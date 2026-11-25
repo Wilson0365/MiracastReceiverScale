@@ -52,6 +52,7 @@ import com.weekd.miracastreceiver.R
 import com.weekd.miracastreceiver.ScaleControlOverlay
 import com.weekd.miracastreceiver.ScaleManager
 import com.weekd.miracastreceiver.ScaleMode
+import com.weekd.miracastreceiver.calculateImageTransform
 import com.weekd.miracastreceiver.cast.CastPlayerBridge
 import com.weekd.miracastreceiver.airplay.StreamStats
 import com.weekd.miracastreceiver.miracast.RtpReceiver
@@ -960,6 +961,11 @@ class PlayerActivity : AppCompatActivity() {
         screenOnSessionActive = true
         player?.pause()
         playerView.visibility = View.GONE
+        mirrorSurfaceView.visibility = View.GONE
+        mirrorRotateLayer.visibility = View.GONE
+        exoRotateLayer?.visibility = View.GONE
+        mirrorAspectJob?.cancel()
+        mirrorAspectJob = null
         imageView.visibility = View.VISIBLE
         updateScreenOn()
         tvError.visibility = View.GONE
@@ -1416,32 +1422,35 @@ class PlayerActivity : AppCompatActivity() {
         texture.invalidate()
     }
 
-    /** 图片直接转 ImageView；转 90°/270° 时按旋转后的宽高重新等比缩放，保证完整显示。 */
+    /** 图片使用自己的 drawable 矩阵，缩放菜单与视频共用，但不切换视频 Surface。 */
     private fun applyImageRotation() {
-        val drawable = imageView.drawable
+        val drawable = imageView.drawable ?: return
         val viewW = imageView.width.toFloat()
         val viewH = imageView.height.toFloat()
-        var scale = 1f
-        if (drawable != null && viewW > 0f && viewH > 0f && rotationDegrees % 180 != 0) {
-            val iw = drawable.intrinsicWidth.toFloat()
-            val ih = drawable.intrinsicHeight.toFloat()
-            if (iw > 0f && ih > 0f) {
-                val fitNormal = minOf(viewW / iw, viewH / ih)
-                val fitRotated = minOf(viewW / ih, viewH / iw)
-                scale = fitRotated / fitNormal
-            }
+        val iw = drawable.intrinsicWidth.toFloat()
+        val ih = drawable.intrinsicHeight.toFloat()
+        val manager = if (::scaleManager.isInitialized) scaleManager else null
+        val transform = calculateImageTransform(iw, ih, viewW, viewH, rotationDegrees, manager) ?: return
+        // 只变换图片内容，保持全屏 ImageView 与黑色背景不变；每次从原图重新计算。
+        imageView.rotation = 0f
+        imageView.scaleX = 1f
+        imageView.scaleY = 1f
+        imageView.scaleType = ImageView.ScaleType.MATRIX
+        imageView.imageMatrix = Matrix().apply {
+            postTranslate(-iw / 2f, -ih / 2f)
+            postRotate(rotationDegrees.toFloat())
+            postScale(transform.scale, transform.scale)
+            postTranslate(viewW / 2f + transform.offsetX, viewH / 2f + transform.offsetY)
         }
-        imageView.rotation = rotationDegrees.toFloat()
-        imageView.scaleX = scale
-        imageView.scaleY = scale
+        imageView.invalidate()
     }
 
     private fun resetImageRotation() {
-        if (imageView.rotation != 0f || imageView.scaleX != 1f) {
-            imageView.rotation = 0f
-            imageView.scaleX = 1f
-            imageView.scaleY = 1f
-        }
+        imageView.rotation = 0f
+        imageView.scaleX = 1f
+        imageView.scaleY = 1f
+        imageView.imageMatrix = Matrix()
+        imageView.scaleType = ImageView.ScaleType.FIT_CENTER
     }
 
     private fun isMirrorSession() = isAirPlayMirrorSession || isMiracastSession
