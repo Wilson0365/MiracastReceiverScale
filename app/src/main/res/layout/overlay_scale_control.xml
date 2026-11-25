@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 比例控制浮层：电视遥控器操作，横向排列，底部居中 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="wrap_content"
+<!-- 遥控器焦点移动时自动滚动，窄屏也能选到所有放大档位。 -->
+<HorizontalScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:background="#CC000000"
+    android:fillViewport="true"
+    android:scrollbars="none">
+<LinearLayout
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
     android:orientation="horizontal"
     android:padding="12dp"
     android:gravity="center_vertical">
@@ -98,4 +103,44 @@
         android:textSize="16sp"
         android:text="250%" />
 
+    <TextView
+        android:id="@+id/btn_scale_300"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/scale_button_selector"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:padding="12dp"
+        android:layout_marginStart="6dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        android:text="300%" />
+
+    <TextView
+        android:id="@+id/btn_scale_350"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/scale_button_selector"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:padding="12dp"
+        android:layout_marginStart="6dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        android:text="350%" />
+
+    <TextView
+        android:id="@+id/btn_scale_400"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/scale_button_selector"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:padding="12dp"
+        android:layout_marginStart="6dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        android:text="400%" />
+
 </LinearLayout>
+</HorizontalScrollView>

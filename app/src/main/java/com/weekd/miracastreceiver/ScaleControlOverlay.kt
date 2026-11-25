@@ -30,6 +30,9 @@ class ScaleControlOverlay @JvmOverloads constructor(
             ScaleMode.SCALE_175 to binding.btnScale175,
             ScaleMode.SCALE_200 to binding.btnScale200,
             ScaleMode.SCALE_250 to binding.btnScale250,
+            ScaleMode.SCALE_300 to binding.btnScale300,
+            ScaleMode.SCALE_350 to binding.btnScale350,
+            ScaleMode.SCALE_400 to binding.btnScale400,
         )
 
         buttonMap.forEach { (mode, btn) ->
