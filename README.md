@@ -7,7 +7,7 @@
 - DLNA 单张图片接入共用比例菜单：用图片矩阵处理缩放、填满、旋转和平移，不切换视频输出 Surface。
 - 平移限制在图片有效边界内，原始比例恢复居中显示。
 - 保留 250%，增加 300%、350%、400%；比例栏横向滚动，遥控器可选到全部档位。
-- 本次发布仅提供 32 位 `armeabi-v7a` 的 Release 安装包和 Debug 测试包。
+- 本次发布提供两份 32 位 `armeabi-v7a` Release 安装包：原版与独立安装的 Miracast Scale SP2P 版。SP2P 源码在 `feature/system-p2p-app-media-side-by-side`，版本为 `1.2.14-system-p2p`（versionCode 21）。
 
 图片缩放计算已覆盖回归测试；用户反馈的电视黑屏现象仍需真机安装验证。
 
